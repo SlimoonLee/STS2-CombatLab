@@ -1,0 +1,2 @@
+# Only local artwork generation needs a Python package; the server uses stdlib.
+Pillow==12.3.0

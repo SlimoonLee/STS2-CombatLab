@@ -1,0 +1,40 @@
+{
+  "mode": "build",
+  "character": "IRONCLAD",
+  "seed": "COMBAT-LAB-IRONCLAD",
+  "ascension": 10,
+  "clearStartingRelics": true,
+  "deck": [
+    {
+      "id": "STRIKE_IRONCLAD",
+      "count": 5
+    },
+    {
+      "id": "DEFEND_IRONCLAD",
+      "count": 4
+    },
+    {
+      "id": "BASH",
+      "count": 1,
+      "upgrade": 1
+    }
+  ],
+  "relics": [
+    "BURNING_BLOOD"
+  ],
+  "encounters": [
+    {
+      "id": "FUZZY_WURM_CRAWLER_WEAK",
+      "kind": "normal"
+    }
+  ],
+  "samples": 3,
+  "search": {
+    "profile": "Medium",
+    "budgetMs": 8000,
+    "dop": 1,
+    "potionPolicy": "Smart"
+  },
+  "act": 0,
+  "actId": "OVERGROWTH"
+}

@@ -1,0 +1,1200 @@
+diff --git a/src/Testing/Host/UnattendedTestProtocol.cs b/src/Testing/Host/UnattendedTestProtocol.cs
+index 96021a22..47f5b7f6 100644
+--- a/src/Testing/Host/UnattendedTestProtocol.cs
++++ b/src/Testing/Host/UnattendedTestProtocol.cs
+@@ -51,6 +51,8 @@ internal sealed class UnattendedTestRequest
+     public bool PreserveNativeCombatStateForTest { get; init; }
+     public int Ascension { get; init; }
+     public int ActIndexForTest { get; init; }
++    /// <summary>Optional act model id for the selected stage, used by alternate acts such as UNDERDOCKS.</summary>
++    public string? ActIdForTest { get; init; }
+     public bool MarkEncounterAsSecondBossForTest { get; init; }
+     public int EnemyCurrentHp { get; init; } = 1;
+     public int[] InitialEnemyMaxHps { get; init; } = [];
+@@ -89,6 +91,8 @@ internal sealed class UnattendedTestRequest
+     public bool ClearPlayerHand { get; init; }
+     public bool ClearPlayerPiles { get; init; }
+     public bool ClearRunDeck { get; init; }
++    /// <summary>直接构建牌组时移除角色的原生起始遗物，再注入请求中的遗物。</summary>
++    public bool ClearStartingRelics { get; init; }
+     public bool ClearAllPowers { get; init; }
+     public bool VerifyPredictionFailureBoundaries { get; init; }
+     public bool VerifySearchPolicySnapshot { get; init; }
+diff --git a/src/Testing/Host/UnattendedTestRunner.Offline.cs b/src/Testing/Host/UnattendedTestRunner.Offline.cs
+index 98fa68f8..0635d9df 100644
+--- a/src/Testing/Host/UnattendedTestRunner.Offline.cs
++++ b/src/Testing/Host/UnattendedTestRunner.Offline.cs
+@@ -179,6 +179,10 @@ internal sealed partial class UnattendedTestRunner
+         internal void CaptureOpening(CombatState combat, Player player)
+             => _runner._scenarioBuilder.OfflineCaptureOpening(combat, player);
+ 
++        internal void ApplyPreCombatSimulationRng(
++            RunState runState, MegaCrit.Sts2.Core.Models.EncounterModel encounter, ulong sampleSeed)
++            => _runner._scenarioBuilder.OfflineApplyPreCombatSimulationRng(runState, encounter, sampleSeed);
++
+         internal Task InjectInitialStateAsync(CombatState combat, Player player)
+             => _runner._scenarioBuilder.InjectInitialStateAsync(combat, player);
+ 
+@@ -227,6 +231,10 @@ internal sealed partial class UnattendedTestRunner
+ 
+         internal void OfflineCaptureOpening(CombatState combat, Player player)
+             => CaptureGeneratedOpening(combat, player);
++
++        internal void OfflineApplyPreCombatSimulationRng(
++            RunState runState, MegaCrit.Sts2.Core.Models.EncounterModel encounter, ulong sampleSeed)
++            => ApplyPreCombatSimulationRng(runState, encounter, sampleSeed);
+     }
+ 
+     private sealed partial class Writer
+diff --git a/src/Testing/Host/UnattendedTestRunner.ScenarioBuilder.cs b/src/Testing/Host/UnattendedTestRunner.ScenarioBuilder.cs
+index 5406c661..98e763a3 100644
+--- a/src/Testing/Host/UnattendedTestRunner.ScenarioBuilder.cs
++++ b/src/Testing/Host/UnattendedTestRunner.ScenarioBuilder.cs
+@@ -199,7 +199,7 @@ internal sealed partial class UnattendedTestRunner
+                 await runner._host.StartNewSingleplayerRun(
+                 character,
+                 shouldSave: false,
+-                ActModel.GetDefaultList(),
++                BuildActs(request),
+                 modifiers,
+                 request.Seed,
+                 GameMode.Standard,
+@@ -863,6 +863,19 @@ internal sealed partial class UnattendedTestRunner
+                 runner._completedChecks.Add($"PreCombatInterveningMapPoints:{steps.Count}");
+         }
+ 
++        private static IReadOnlyList<ActModel> BuildActs(UnattendedTestRequest request)
++        {
++            List<ActModel> acts = ActModel.GetDefaultList().Select(act => act.ToMutable()).ToList();
++            if (string.IsNullOrWhiteSpace(request.ActIdForTest))
++                return acts;
++
++            ActModel selected = ModelDb.GetById<ActModel>(new ModelId(ModelId.SlugifyCategory<ActModel>(), request.ActIdForTest)).ToMutable();
++            if (selected.Index < 0 || selected.Index >= acts.Count)
++                throw new InvalidDataException($"阶段模型 {request.ActIdForTest} 的索引 {selected.Index} 超出当前阶段范围。");
++            acts[selected.Index] = selected;
++            return acts;
++        }
++
+         private async Task<RunState> RestoreRunSnapshotDirectlyAsync(UnattendedTestRequest request)
+         {
+             if (string.IsNullOrWhiteSpace(request.RunSnapshotPath))
+diff --git a/tools/search/OfflineSearchHarness/GameBootstrap.cs b/tools/search/OfflineSearchHarness/GameBootstrap.cs
+index 2e7cd7b0..dc7b93bf 100644
+--- a/tools/search/OfflineSearchHarness/GameBootstrap.cs
++++ b/tools/search/OfflineSearchHarness/GameBootstrap.cs
+@@ -31,6 +31,8 @@ namespace OfflineSearchHarness;
+ /// PlatformUtil.GetPlatformBranch              平台原生查询                                   None                      无：同上
+ /// PlatformUtil.GetPlayerNameRaw               策略构造读命令行与 Godot 文件系统               与无人测试同一份映射      无：只是显示名
+ /// Godot.Node 及其 304 个子类的静态构造         字段初始化造 StringName/NodePath（原生）        跳过静态构造              无：离线不建节点树
++/// ArchaicTooth/DustyTome/TouchOfOrobas 保存属性  setter 还会准备悬浮提示贴图                只写玩法字段，跳过显示准备          无：只移除界面预计算
++/// SoulNexus.AfterDeath、Decimillipede.ReattachMove  视觉动作仍触碰节点/贴图资源               TestMode 下只保留生命周期/玩法动作    无：只移除视觉动作
+ /// </code>
+ ///
+ /// 还有一处不是 Harmony 补丁：<c>SolverController.DisplayServerNameProvider</c> 被设成固定返回
+@@ -110,6 +112,19 @@ internal static class GameBootstrap
+         //    走模组自己留的注入口给固定值：与游戏内 --headless 取到的一致，恢复逻辑照样关闭。
+         CombatSolver.SolverController.DisplayServerNameProvider = static () => "headless";
+         _bypasses.Add("SolverController.DisplayServerNameProvider -> \"headless\"（不启动显示服务器；与游戏内 --headless 同值）");
++
++        // A few serialized relic properties are gameplay state, but their
++        // original setters eagerly build card/relic hover tips.  Those tips
++        // eventually ask Godot for textures while a save is being restored.
++        // Keep the saved values and skip only that display-only preparation.
++        HeadlessSavePatches.Install();
++        _bypasses.Add("TouchOfOrobas/ArchaicTooth/DustyTome 保存属性保留原值，跳过 Godot 悬浮提示贴图构建");
++
++        // A small number of monster actions also contain a visual-only native
++        // call outside their TestMode guard.  Preserve the action lifecycle and
++        // gameplay state while omitting those visuals in the headless host.
++        HeadlessActionPatches.Install();
++        _bypasses.Add("SoulNexus/Decimillipede 视觉动作跳过 Godot 节点/贴图调用");
+     }
+ 
+     /// <summary>第二步：游戏静态状态。顺序照 OneTimeInitialization.ExecuteEssential。</summary>
+diff --git a/tools/search/OfflineSearchHarness/GeneratedScenarioSetup.cs b/tools/search/OfflineSearchHarness/GeneratedScenarioSetup.cs
+index 8ab3bc76..7cc597db 100644
+--- a/tools/search/OfflineSearchHarness/GeneratedScenarioSetup.cs
++++ b/tools/search/OfflineSearchHarness/GeneratedScenarioSetup.cs
+@@ -27,6 +27,7 @@ internal sealed class GeneratedScenarioSetup
+     public UnattendedTestRunner.OfflineScenarioSession Session { get; }
+     public ResolvedGeneratedCombatScenario? Resolved { get; }
+     public UnattendedTestRequest Request => Session.Request;
++    public ImportedPlayerState? ImportedState { get; set; }
+ 
+     private GeneratedScenarioSetup(
+         UnattendedTestRunner.OfflineScenarioSession session, ResolvedGeneratedCombatScenario? resolved)
+@@ -54,9 +55,8 @@ internal sealed class GeneratedScenarioSetup
+     {
+         if (request.GeneratedScenarioPath is not { } path)
+         {
+-            if (request.ReplayStatePath != null || request.RunSnapshotPath != null
+-                || request.AdditionalMonsterIds.Length > 0 || request.ModifierIds.Length > 0)
+-                throw new InvalidDataException("离线固定夹具暂不支持快照恢复、追加怪物或自定义规则。");
++            if (request.ReplayStatePath != null || request.AdditionalMonsterIds.Length > 0)
++                throw new InvalidDataException("离线固定夹具暂不支持录像恢复或追加怪物；请使用生成场景或显式遭遇配置。");
+             return new GeneratedScenarioSetup(UnattendedTestRunner.OfflineScenarioSession.Create(
+                 WithEvidenceDirectory(request, evidenceDirectory)), null);
+         }
+@@ -91,33 +91,74 @@ internal sealed class GeneratedScenarioSetup
+             if (RunManager.Instance.IsInProgress)
+                 throw new InvalidOperationException("已经有进行中的跑局。");
+ 
+-            HarnessLog.Trace("gen.start_run");
+-            UnlockState unlockState = SaveManager.Instance.GenerateUnlockStateFromProgress();
+-            RunState runState = RunState.CreateForNewRun(
+-                [Player.CreateForNewRun(character, unlockState, 1uL)],
+-                ActModel.GetDefaultList().Select(act => act.ToMutable()).ToList(),
+-                [],
+-                GameMode.Standard,
+-                request.Ascension,
+-                request.Seed);
+-            RunManager.Instance.SetUpNewSingleplayer(runState, shouldSave: false);
+-            await RunManager.Instance.FinalizeStartingRelics();
+-            RunManager.Instance.Launch();
+-            await RunManager.Instance.EnterAct(0, doTransition: false);
+-            HarnessLog.Trace("gen.run_started");
+-
+-            if (request.ActIndexForTest != 0)
++            bool loadedRunSnapshot = !string.IsNullOrWhiteSpace(request.RunSnapshotPath);
++            RunState runState;
++            if (loadedRunSnapshot)
+             {
+-                if ((uint)request.ActIndexForTest >= (uint)runState.Acts.Count)
+-                    throw new InvalidOperationException($"测试幕索引超出范围：{request.ActIndexForTest}。");
+-                await RunManager.Instance.SetActInternal(request.ActIndexForTest);
++                if (!request.LoadRunSnapshotDirectly)
++                    throw new InvalidDataException("离线存档读取要求 LoadRunSnapshotDirectly=true。");
++                HarnessLog.Trace("gen.restore_snapshot");
++                runState = await RestoreRunSnapshotDirectlyAsync(request);
++                if (!string.Equals(
++                        runState.Players.Single().Character.Id.Entry,
++                        request.CharacterId,
++                        StringComparison.OrdinalIgnoreCase))
++                    throw new InvalidOperationException("完整跑局快照的角色与请求角色不一致。");
++                HarnessLog.Trace("gen.snapshot_restored");
++            }
++            else
++            {
++                HarnessLog.Trace("gen.start_run");
++                UnlockState unlockState = SaveManager.Instance.GenerateUnlockStateFromProgress();
++                ModifierModel[] modifiers = request.ModifierIds
++                    .Select(id => ResolveUnique(
++                        ModelDb.GoodModifiers.Concat(ModelDb.BadModifiers),
++                        id,
++                        "自定义规则").ToMutable())
++                    .ToArray();
++                runState = RunState.CreateForNewRun(
++                    [Player.CreateForNewRun(character, unlockState, 1uL)],
++                    BuildActs(request),
++                    modifiers,
++                    GameMode.Standard,
++                    request.Ascension,
++                    request.Seed);
++                RunManager.Instance.SetUpNewSingleplayer(runState, shouldSave: false);
++                await RunManager.Instance.FinalizeStartingRelics();
++                RunManager.Instance.Launch();
++                await RunManager.Instance.EnterAct(0, doTransition: false);
++                HarnessLog.Trace("gen.run_started");
++
++                if (request.ActIndexForTest != 0)
++                {
++                    if ((uint)request.ActIndexForTest >= (uint)runState.Acts.Count)
++                        throw new InvalidOperationException($"测试幕索引超出范围：{request.ActIndexForTest}。");
++                    await RunManager.Instance.SetActInternal(request.ActIndexForTest);
++                }
+             }
+             HarnessLog.Trace("gen.act_applied");
+ 
+             Player runPlayer = LocalContext.GetMe(runState)
+                 ?? throw new InvalidOperationException("创建跑局后找不到本地玩家。");
+ 
++            if (loadedRunSnapshot && request.TargetActFloor is { } snapshotTargetFloor)
++                runState.ActFloor = snapshotTargetFloor;
++            if (loadedRunSnapshot && request.PreCombatPlayerCurrentHpOverride is { } preCombatPlayerHp)
++            {
++                if (preCombatPlayerHp < 1 || preCombatPlayerHp > runPlayer.Creature.MaxHp)
++                {
++                    throw new InvalidOperationException(
++                        $"战前玩家生命覆盖必须在 1 到 {runPlayer.Creature.MaxHp} 之间，收到 {preCombatPlayerHp}。");
++                }
++                runPlayer.Creature.SetCurrentHpInternal(preCombatPlayerHp);
++            }
++
+             Session.PrepareStartingRelics(runPlayer);
++            if (!loadedRunSnapshot && request.ClearStartingRelics)
++            {
++                foreach (RelicModel relic in runPlayer.Relics.ToArray())
++                    runPlayer.RemoveRelicInternal(relic, silent: true);
++            }
+             foreach (UnattendedRelicInjection injection in request.Relics)
+                 await UnattendedTestRunner.OfflineScenarioSession.InjectRelicAsync(runPlayer, injection);
+             HarnessLog.Trace($"gen.relics_injected relics={runPlayer.Relics.Count}");
+@@ -131,10 +172,17 @@ internal sealed class GeneratedScenarioSetup
+             if (request.PreserveNativeCombatStateForTest)
+                 foreach (UnattendedPotionInjection injection in request.Potions)
+                     UnattendedTestRunner.OfflineScenarioSession.InjectPotionForTest(runPlayer, injection.PotionId);
++            if (ImportedState is not null)
++            {
++                ImportedState.Apply(runState, runPlayer);
++                Session.AddCompletedCheck("CombatLab:SerializedPlayer:NativeSync:BeforeRoomEntry");
++            }
+             Session.CaptureLoadout(runState, runPlayer);
+             HarnessLog.Trace("gen.loadout_captured");
+ 
+             EncounterModel mutableEncounter = encounter.ToMutable();
++            if (request.PreCombatSimulationSeed is { } simulationSeed)
++                Session.ApplyPreCombatSimulationRng(runState, mutableEncounter, simulationSeed);
+             MapPointType targetMapPointType = request.TargetMapPointType != MapPointType.Unassigned
+                 ? request.TargetMapPointType
+                 : request.TargetRoomType switch
+@@ -144,8 +192,23 @@ internal sealed class GeneratedScenarioSetup
+                     RoomType.Boss => MapPointType.Boss,
+                     _ => throw new InvalidOperationException($"只支持战斗房间，收到 {request.TargetRoomType}。"),
+                 };
+-            await RunManager.Instance.EnterRoomDebug(
+-                request.TargetRoomType, targetMapPointType, mutableEncounter);
++            if (loadedRunSnapshot)
++            {
++                if (request.TargetActFloor is not { } targetFloor
++                    || request.TargetMapColumn is not { } targetColumn)
++                    throw new InvalidDataException("完整跑局恢复请求需要 targetActFloor 和 targetMapColumn。");
++                await RunManager.Instance.EnterMapCoordDebug(
++                    new MapCoord(targetColumn, targetFloor - 1),
++                    request.TargetRoomType,
++                    targetMapPointType,
++                    mutableEncounter,
++                    showTransition: false);
++            }
++            else
++            {
++                await RunManager.Instance.EnterRoomDebug(
++                    request.TargetRoomType, targetMapPointType, mutableEncounter);
++            }
+             HarnessLog.Trace("gen.entered_room");
+             return choiceScope;
+         }
+@@ -179,4 +242,46 @@ internal sealed class GeneratedScenarioSetup
+             _ => throw new InvalidOperationException($"{kind} {input} 不唯一。"),
+         };
+     }
++
++    private static List<ActModel> BuildActs(UnattendedTestRequest request)
++    {
++        List<ActModel> acts = ActModel.GetDefaultList().Select(act => act.ToMutable()).ToList();
++        if (string.IsNullOrWhiteSpace(request.ActIdForTest))
++            return acts;
++
++        ActModel selected = ModelDb.GetById<ActModel>(new ModelId(ModelId.SlugifyCategory<ActModel>(), request.ActIdForTest)).ToMutable();
++        if (selected.Index < 0 || selected.Index >= acts.Count)
++            throw new InvalidDataException($"阶段模型 {request.ActIdForTest} 的索引 {selected.Index} 超出当前阶段范围。");
++        acts[selected.Index] = selected;
++        return acts;
++    }
++
++    private async Task<RunState> RestoreRunSnapshotDirectlyAsync(UnattendedTestRequest request)
++    {
++        if (string.IsNullOrWhiteSpace(request.RunSnapshotPath))
++            throw new InvalidDataException("完整跑局恢复请求缺少 runSnapshotPath。");
++        if (!File.Exists(request.RunSnapshotPath))
++            throw new FileNotFoundException("找不到完整跑局快照。", request.RunSnapshotPath);
++        if (request.TargetActFloor is not { } targetFloor || targetFloor < 1)
++            throw new InvalidDataException("完整跑局恢复请求需要正数 targetActFloor。");
++
++        SerializableRun save = JsonSerializer.Deserialize(
++            await File.ReadAllTextAsync(request.RunSnapshotPath),
++            JsonSerializationUtility.GetTypeInfo<SerializableRun>())
++            ?? throw new InvalidDataException("完整跑局快照为空。");
++        if (save.CurrentActIndex != request.ActIndexForTest)
++        {
++            throw new InvalidDataException(
++                $"快照幕索引 {save.CurrentActIndex} 与请求 actIndexForTest {request.ActIndexForTest} 不一致。");
++        }
++
++        RunState restored = RunState.FromSerializable(save);
++        await RunManager.Instance.SetUpSavedSingleplayer(restored, save);
++        RunManager.Instance.Launch();
++        // InitializeSavedRun 保留了保存的 SerializableActMap；GenerateMap 会消费它，
++        // 因此不会用当前进程的 RNG 重新生成地图。
++        await RunManager.Instance.GenerateMap();
++        Session.AddCompletedCheck("DirectRunSnapshot:LoadedSavedMap");
++        return restored;
++    }
+ }
+diff --git a/tools/search/OfflineSearchHarness/HeadlessActionPatches.cs b/tools/search/OfflineSearchHarness/HeadlessActionPatches.cs
+new file mode 100644
+index 00000000..16a7618a
+--- /dev/null
++++ b/tools/search/OfflineSearchHarness/HeadlessActionPatches.cs
+@@ -0,0 +1,59 @@
++using System.Reflection;
++using HarmonyLib;
++using MegaCrit.Sts2.Core.Entities.Creatures;
++using MegaCrit.Sts2.Core.Models.Monsters;
++using MegaCrit.Sts2.Core.TestSupport;
++
++namespace OfflineSearchHarness;
++
++/// <summary>
++/// Narrow guards for combat actions that still contain a visual-only Godot call
++/// after the game has already entered its test-mode branch.  These are installed
++/// only by the offline host; the game process keeps the original visual behavior.
++/// </summary>
++internal static class HeadlessActionPatches
++{
++    internal static void Install()
++    {
++        MethodInfo soulNexusAfterDeath = AccessTools.Method(
++            typeof(SoulNexus), "AfterDeath", [typeof(Creature)])
++            ?? throw new MissingMethodException(typeof(SoulNexus).FullName, "AfterDeath");
++        GameBootstrap.Harmony.Patch(
++            soulNexusAfterDeath,
++            prefix: new HarmonyMethod(typeof(HeadlessActionPatches), nameof(SkipSoulNexusDeathVisualPrefix)));
++
++        MethodInfo decimillipedeReattach = AccessTools.Method(
++            typeof(DecimillipedeSegment), "ReattachMove")
++            ?? throw new MissingMethodException(typeof(DecimillipedeSegment).FullName, "ReattachMove");
++        GameBootstrap.Harmony.Patch(
++            decimillipedeReattach,
++            prefix: new HarmonyMethod(typeof(HeadlessActionPatches), nameof(SkipDecimillipedeReattachVisualPrefix)));
++    }
++
++    private static bool SkipSoulNexusDeathVisualPrefix(SoulNexus __instance)
++    {
++        if (!TestMode.IsOn)
++            return true;
++
++        // The original handler removes itself before touching NCombatRoom. Keep
++        // that lifecycle behavior even when the visual animation is omitted.
++        MethodInfo handlerMethod = AccessTools.Method(typeof(SoulNexus), "AfterDeath", [typeof(Creature)])
++            ?? throw new MissingMethodException(typeof(SoulNexus).FullName, "AfterDeath");
++        Action<Creature> handler = (Action<Creature>)Delegate.CreateDelegate(
++            typeof(Action<Creature>), __instance, handlerMethod);
++        __instance.Creature.Died -= handler;
++        return false;
++    }
++
++    private static bool SkipDecimillipedeReattachVisualPrefix(ref Task __result)
++    {
++        if (!TestMode.IsOn)
++            return true;
++
++        // ReattachMove already skips gameplay reattachment when the combat is
++        // not live, but unconditionally loads a phobia texture afterwards.
++        // In a process without Godot that ResourceLoader call is a native crash.
++        __result = Task.CompletedTask;
++        return false;
++    }
++}
+diff --git a/tools/search/OfflineSearchHarness/HeadlessSavePatches.cs b/tools/search/OfflineSearchHarness/HeadlessSavePatches.cs
+new file mode 100644
+index 00000000..3da394b4
+--- /dev/null
++++ b/tools/search/OfflineSearchHarness/HeadlessSavePatches.cs
+@@ -0,0 +1,111 @@
++using System.Reflection;
++using HarmonyLib;
++using MegaCrit.Sts2.Core.Models;
++using MegaCrit.Sts2.Core.Models.Relics;
++using MegaCrit.Sts2.Core.Saves.Runs;
++
++namespace OfflineSearchHarness;
++
++/// <summary>
++/// Save properties are gameplay state, but a few model setters also prepare UI
++/// hover tips.  The offline host has no Godot resource loader, so keep the
++/// saved model ids while omitting only that display-only preparation.
++/// </summary>
++internal static class HeadlessSavePatches
++{
++    private static readonly FieldInfo StarterRelicField = AccessTools.Field(
++        typeof(TouchOfOrobas), "_starterRelic")
++        ?? throw new MissingFieldException(typeof(TouchOfOrobas).FullName, "_starterRelic");
++
++    private static readonly FieldInfo UpgradedRelicField = AccessTools.Field(
++        typeof(TouchOfOrobas), "_upgradedRelic")
++        ?? throw new MissingFieldException(typeof(TouchOfOrobas).FullName, "_upgradedRelic");
++
++    private static readonly FieldInfo ArchaicStarterCardField = AccessTools.Field(
++        typeof(ArchaicTooth), "_serializableStarterCard")
++        ?? throw new MissingFieldException(typeof(ArchaicTooth).FullName, "_serializableStarterCard");
++
++    private static readonly FieldInfo ArchaicAncientCardField = AccessTools.Field(
++        typeof(ArchaicTooth), "_serializableAncientCard")
++        ?? throw new MissingFieldException(typeof(ArchaicTooth).FullName, "_serializableAncientCard");
++
++    private static readonly FieldInfo DustyAncientCardField = AccessTools.Field(
++        typeof(DustyTome), "_ancientCard")
++        ?? throw new MissingFieldException(typeof(DustyTome).FullName, "_ancientCard");
++
++    internal static void Install()
++    {
++        MethodInfo starterSetter = AccessTools.PropertySetter(
++            typeof(TouchOfOrobas), nameof(TouchOfOrobas.StarterRelic))
++            ?? throw new MissingMethodException(typeof(TouchOfOrobas).FullName, "set_StarterRelic");
++        MethodInfo upgradedSetter = AccessTools.PropertySetter(
++            typeof(TouchOfOrobas), nameof(TouchOfOrobas.UpgradedRelic))
++            ?? throw new MissingMethodException(typeof(TouchOfOrobas).FullName, "set_UpgradedRelic");
++        GameBootstrap.Harmony.Patch(
++            starterSetter,
++            prefix: new HarmonyMethod(typeof(HeadlessSavePatches), nameof(SetStarterRelicPrefix)));
++        GameBootstrap.Harmony.Patch(
++            upgradedSetter,
++            prefix: new HarmonyMethod(typeof(HeadlessSavePatches), nameof(SetUpgradedRelicPrefix)));
++
++        MethodInfo archaicStarterSetter = AccessTools.PropertySetter(
++            typeof(ArchaicTooth), nameof(ArchaicTooth.StarterCard))
++            ?? throw new MissingMethodException(typeof(ArchaicTooth).FullName, "set_StarterCard");
++        MethodInfo archaicAncientSetter = AccessTools.PropertySetter(
++            typeof(ArchaicTooth), nameof(ArchaicTooth.AncientCard))
++            ?? throw new MissingMethodException(typeof(ArchaicTooth).FullName, "set_AncientCard");
++        GameBootstrap.Harmony.Patch(
++            archaicStarterSetter,
++            prefix: new HarmonyMethod(typeof(HeadlessSavePatches), nameof(SetArchaicStarterCardPrefix)));
++        GameBootstrap.Harmony.Patch(
++            archaicAncientSetter,
++            prefix: new HarmonyMethod(typeof(HeadlessSavePatches), nameof(SetArchaicAncientCardPrefix)));
++
++        MethodInfo dustyAncientSetter = AccessTools.PropertySetter(
++            typeof(DustyTome), nameof(DustyTome.AncientCard))
++            ?? throw new MissingMethodException(typeof(DustyTome).FullName, "set_AncientCard");
++        GameBootstrap.Harmony.Patch(
++            dustyAncientSetter,
++            prefix: new HarmonyMethod(typeof(HeadlessSavePatches), nameof(SetDustyAncientCardPrefix)));
++    }
++
++    private static bool SetStarterRelicPrefix(TouchOfOrobas __instance, ModelId? value)
++    {
++        SetSavedField(StarterRelicField, __instance, value, "StarterRelic");
++        return false;
++    }
++
++    private static bool SetUpgradedRelicPrefix(TouchOfOrobas __instance, ModelId? value)
++    {
++        SetSavedField(UpgradedRelicField, __instance, value, "UpgradedRelic");
++        return false;
++    }
++
++    private static bool SetArchaicStarterCardPrefix(ArchaicTooth __instance, SerializableCard? value)
++    {
++        __instance.AssertMutable();
++        ArchaicStarterCardField.SetValue(__instance, value);
++        return false;
++    }
++
++    private static bool SetArchaicAncientCardPrefix(ArchaicTooth __instance, SerializableCard? value)
++    {
++        __instance.AssertMutable();
++        ArchaicAncientCardField.SetValue(__instance, value);
++        return false;
++    }
++
++    private static bool SetDustyAncientCardPrefix(DustyTome __instance, ModelId? value)
++    {
++        __instance.AssertMutable();
++        DustyAncientCardField.SetValue(__instance, value);
++        return false;
++    }
++
++    private static void SetSavedField(FieldInfo field, TouchOfOrobas instance, ModelId? value, string name)
++    {
++        if (field.GetValue(instance) is not null)
++            throw new InvalidOperationException($"Recursive Core setup called twice for {name}!");
++        field.SetValue(instance, value);
++    }
++}
+diff --git a/tools/search/OfflineSearchHarness/ImportedPlayerState.cs b/tools/search/OfflineSearchHarness/ImportedPlayerState.cs
+new file mode 100644
+index 00000000..f6e7a694
+--- /dev/null
++++ b/tools/search/OfflineSearchHarness/ImportedPlayerState.cs
+@@ -0,0 +1,67 @@
++using System.Text.Json;
++using System.Text.Json.Nodes;
++using MegaCrit.Sts2.Core.Entities.Players;
++using MegaCrit.Sts2.Core.Runs;
++using MegaCrit.Sts2.Core.Saves;
++using MegaCrit.Sts2.Core.Saves.Runs;
++
++namespace OfflineSearchHarness;
++
++/// <summary>Combat Lab's serialized loadout is applied before native room entry.</summary>
++internal sealed class ImportedPlayerState
++{
++    private readonly JsonObject _data;
++
++    private ImportedPlayerState(JsonObject data) => _data = data;
++
++    public static ImportedPlayerState? FromRequest(string requestPath)
++    {
++        using JsonDocument request = JsonDocument.Parse(File.ReadAllText(requestPath));
++        if (!request.RootElement.TryGetProperty("combatLabPlayerStatePath", out JsonElement path))
++            return null;
++        string filename = path.GetString() ?? throw new InvalidDataException("Missing imported player state path.");
++        JsonObject data = JsonNode.Parse(File.ReadAllText(filename))?.AsObject()
++            ?? throw new InvalidDataException("Empty imported player state.");
++        if (data["schemaVersion"]?.GetValue<int>() != 1)
++            throw new InvalidDataException("Unsupported imported player state schema.");
++        return new ImportedPlayerState(data);
++    }
++
++    public void Apply(RunState run, Player player)
++    {
++        JsonObject patch = _data["player"]?.AsObject()
++            ?? throw new InvalidDataException("Imported state has no player.");
++        JsonObject baseline = JsonSerializer.SerializeToNode(player.ToSerializable(),
++            JsonSerializationUtility.GetTypeInfo<SerializablePlayer>())!.AsObject();
++        string[] fields = ["current_hp", "max_hp", "gold", "max_energy", "max_potion_slot_count",
++            "base_orb_slot_count", "deck", "relics", "potions", "extra_fields"];
++        foreach (string field in fields)
++            if (patch.TryGetPropertyValue(field, out JsonNode? value))
++                baseline[field] = value?.DeepClone();
++        SerializablePlayer imported = JsonSerializer.Deserialize(baseline.ToJsonString(),
++            JsonSerializationUtility.GetTypeInfo<SerializablePlayer>())
++            ?? throw new InvalidDataException("Cannot deserialize imported player.");
++        if (imported.MaxHp < 1 || imported.CurrentHp < 1 || imported.CurrentHp > imported.MaxHp)
++            throw new InvalidDataException("Imported player must be alive with valid HP.");
++        if (imported.MaxPotionSlotCount < 0 || imported.MaxEnergy < 0 || imported.Gold < 0 || imported.BaseOrbSlotCount < 0)
++            throw new InvalidDataException("Imported player has negative stats.");
++        if (imported.Potions.Select(p => p.SlotIndex).Distinct().Count() != imported.Potions.Count
++            || imported.Potions.Any(p => p.SlotIndex < 0 || p.SlotIndex >= imported.MaxPotionSlotCount))
++            throw new InvalidDataException("Imported potion slots are invalid.");
++        // Sync restores inventories silently. Relic pickup effects are already in
++        // the saved HP/gold/capacity and must not be applied a second time.
++        player.SyncWithSerializedPlayer(imported);
++        player.BaseOrbSlotCount = imported.BaseOrbSlotCount;
++        if (_data.TryGetPropertyValue("map_point_history", out JsonNode? history))
++        {
++            var wrapper = new JsonObject { ["map_point_history"] = history?.DeepClone() };
++            SerializableRun saved = JsonSerializer.Deserialize(wrapper.ToJsonString(),
++                JsonSerializationUtility.GetTypeInfo<SerializableRun>())
++                ?? throw new InvalidDataException("Cannot deserialize imported history.");
++            run._mapPointHistory.Clear();
++            run._mapPointHistory.AddRange(saved.MapPointHistory);
++        }
++        if (_data["actFloor"] is JsonNode floor)
++            run.ActFloor = Math.Max(1, floor.GetValue<int>());
++    }
++}
+diff --git a/tools/search/OfflineSearchHarness/ModRuntime.cs b/tools/search/OfflineSearchHarness/ModRuntime.cs
+index 2295d81f..96a8ea3c 100644
+--- a/tools/search/OfflineSearchHarness/ModRuntime.cs
++++ b/tools/search/OfflineSearchHarness/ModRuntime.cs
+@@ -337,6 +337,7 @@ internal static class ModRuntime
+         SolverSettingsSnapshot settings,
+         int budgetMilliseconds,
+         MainLoopContext loop,
++        Action<SolverProgress>? progressCallback,
+         out object describedPolicy,
+         ref bool timeBoundary)
+     {
+@@ -357,7 +358,9 @@ internal static class ModRuntime
+             },
+             policy.Diagnostics.Debug, policy.Diagnostics.PathObserver);
+         CombatBeamSolver solver = new(
+-            root, names, damage, policy with { Diagnostics = diagnostics }, searchProfile: policy.Profile);
++            root, names, damage, policy with { Diagnostics = diagnostics },
++            progressCallback: progressCallback,
++            searchProfile: policy.Profile);
+         // 与参考跑法一致：求解在工作线程上跑，主线程只泵消息循环。
+         Task<SolverResult> solve = Task.Run(solver.Solve);
+         loop.RunUntilCompleted(solve, TimeSpan.FromSeconds(660), "CombatBeamSolver.Solve");
+@@ -432,7 +435,7 @@ internal static class ModRuntime
+             };
+         }
+         HarnessLog.Trace("search_policy");
+-        Action<SolverProgress>? diagnosticProgress = null;
++        Action<SolverProgress>? diagnosticProgress;
+         if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_STREAM_DIAGNOSTICS") == "1")
+         {
+             SearchDiagnosticsSink original = policy.Diagnostics;
+@@ -441,20 +444,21 @@ internal static class ModRuntime
+                 Console.WriteLine($"[search-diagnostic] {message}");
+                 original.Info(message);
+             }, original.Debug, original.PathObserver) };
+-            long lastProgressMilliseconds = 0;
+-            diagnosticProgress = progress =>
+-            {
+-                long now = watch.ElapsedMilliseconds;
+-                long previous = Volatile.Read(ref lastProgressMilliseconds);
+-                if (now - previous < 1000
+-                    || Interlocked.CompareExchange(ref lastProgressMilliseconds, now, previous) != previous)
+-                    return;
+-                Console.WriteLine($"[search-progress] wall_ms={now} phase={progress.Phase} "
+-                    + $"expanded={progress.ExpandedNodes} reviewed_worldlines={progress.ReviewedWorldlines} "
+-                    + $"max_nodes={progress.MaxNodes} turn_layers={progress.CompletedTurnLayers} "
+-                    + $"play_depth={progress.PlayDepth} frontier={progress.FrontierNodes}");
+-            };
+         }
++        long lastProgressMilliseconds = 0;
++        diagnosticProgress = progress =>
++        {
++            long now = watch.ElapsedMilliseconds;
++            long previous = Volatile.Read(ref lastProgressMilliseconds);
++            if (now - previous < 1000
++                || Interlocked.CompareExchange(ref lastProgressMilliseconds, now, previous) != previous)
++                return;
++            Console.WriteLine($"[search-progress] wall_ms={now} phase={progress.Phase} "
++                + $"expanded={progress.ExpandedNodes} reviewed_worldlines={progress.ReviewedWorldlines} "
++                + $"max_nodes={progress.MaxNodes} turn_layers={progress.CompletedTurnLayers} "
++                + $"play_depth={progress.PlayDepth} frontier={progress.FrontierNodes}");
++            Console.Out.Flush();
++        };
+         bool timeBoundary = false;
+         int observedCoordinatorTimeBoundary = 0;
+         SearchDiagnosticsSink timeBoundaryDiagnostics = policy.Diagnostics;
+@@ -490,7 +494,8 @@ internal static class ModRuntime
+                 result = options.SearchMode == "Coordinator"
+                     ? CombatSearchCoordinator.Solve(root, names, damage, policy, CancellationToken.None, diagnosticProgress)
+                     : SolveEvaluate(root, names, damage, policy, settings,
+-                        options.BudgetMilliseconds, loop, out describedPolicy, ref timeBoundary);
++                        options.BudgetMilliseconds, loop, diagnosticProgress,
++                        out describedPolicy, ref timeBoundary);
+             }
+             finally
+             {
+@@ -502,7 +507,8 @@ internal static class ModRuntime
+             result = options.SearchMode == "Coordinator"
+                 ? CombatSearchCoordinator.Solve(root, names, damage, policy, CancellationToken.None, diagnosticProgress)
+                 : SolveEvaluate(root, names, damage, policy, settings,
+-                    options.BudgetMilliseconds, loop, out describedPolicy, ref timeBoundary);
++                    options.BudgetMilliseconds, loop, diagnosticProgress,
++                    out describedPolicy, ref timeBoundary);
+         }
+         if (options.SearchMode == "Coordinator" && policy.MeasurePhasePerformance)
+             LastPhasePerformance = SolverDiagnostics.DescribeSearchPhasePerformance(result);
+diff --git a/tools/search/OfflineSearchHarness/OfflineCombat.cs b/tools/search/OfflineSearchHarness/OfflineCombat.cs
+index 11bf02e9..5e9b14a4 100644
+--- a/tools/search/OfflineSearchHarness/OfflineCombat.cs
++++ b/tools/search/OfflineSearchHarness/OfflineCombat.cs
+@@ -16,7 +16,8 @@ internal sealed record HarnessScenario(
+     string EncounterId,
+     string Seed,
+     int Ascension,
+-    int ActIndexForTest);
++    int ActIndexForTest,
++    string? ActIdForTest = null);
+ 
+ /// <summary>
+ /// 用游戏自己的对象图建一场战斗并推进到玩家第一回合。步骤照
+@@ -37,7 +38,7 @@ internal static class OfflineCombat
+         UnlockState unlockState = SaveManager.Instance.GenerateUnlockStateFromProgress();
+         RunState runState = RunState.CreateForNewRun(
+             [Player.CreateForNewRun(character, unlockState, 1uL)],
+-            ModelDb.ActsByIndex is { } ? ActModel.GetDefaultList().Select(act => act.ToMutable()).ToList() : [],
++            BuildActs(scenario),
+             [],
+             GameMode.Standard,
+             scenario.Ascension,
+@@ -70,6 +71,18 @@ internal static class OfflineCombat
+         HarnessLog.Trace("enter_room_debug");
+     }
+ 
++    private static List<ActModel> BuildActs(HarnessScenario scenario)
++    {
++        List<ActModel> acts = ActModel.GetDefaultList().Select(act => act.ToMutable()).ToList();
++        if (string.IsNullOrWhiteSpace(scenario.ActIdForTest))
++            return acts;
++        ActModel selected = ModelDb.GetById<ActModel>(new ModelId(ModelId.SlugifyCategory<ActModel>(), scenario.ActIdForTest)).ToMutable();
++        if (selected.Index < 0 || selected.Index >= acts.Count)
++            throw new InvalidOperationException($"阶段模型 {scenario.ActIdForTest} 的索引 {selected.Index} 超出当前阶段范围。");
++        acts[selected.Index] = selected;
++        return acts;
++    }
++
+     /// <summary>
+     /// 回合循环是 <c>AfterCombatRoomLoaded</c> 里 fire-and-forget 起来的，所以这里只能靠泵消息循环
+     /// 把它推到「玩家出牌阶段」。判定条件与游戏内 <c>WaitForPlayableCombatAsync</c> 一致。
+diff --git a/tools/search/OfflineSearchHarness/Program.cs b/tools/search/OfflineSearchHarness/Program.cs
+index 42e762e6..d9afc003 100644
+--- a/tools/search/OfflineSearchHarness/Program.cs
++++ b/tools/search/OfflineSearchHarness/Program.cs
+@@ -1,5 +1,6 @@
+ using System.Diagnostics;
+ using System.Reflection;
++using System.Text;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using CombatSolver;
+@@ -18,6 +19,12 @@ internal static class Program
+ 
+     private static int Main(string[] rawArgs)
+     {
++        // Redirected Windows consoles otherwise use the local code page.  The
++        // web service consumes harness progress and diagnostics as UTF-8.
++        UTF8Encoding utf8 = new(encoderShouldEmitUTF8Identifier: false);
++        Console.OutputEncoding = utf8;
++        Console.SetError(new StreamWriter(Console.OpenStandardError(), utf8) { AutoFlush = true });
++
+         if (rawArgs.Length == 1 && rawArgs[0] == "--check-early-turn-continuation-bound")
+         {
+             return EarlyTurnContinuationChecks.Run();
+@@ -42,6 +49,8 @@ internal static class Program
+ 
+         HarnessLog.VerboseGameLog = options.VerboseGameLog;
+         HarnessLog.Language = options.Language;
++        if (options.WorkerManifestPath is not null)
++            return WarmWorker.Run(options);
+         Directory.CreateDirectory(options.OutputDirectory);
+ 
+         List<StepRecord> steps = [];
+@@ -89,6 +98,7 @@ internal static class Program
+                     UnattendedTestRequest request = GeneratedScenarioSetup.ReadRequest(options.RequestPath);
+                     generated = GeneratedScenarioSetup.Prepare(
+                         request, Path.Combine(options.OutputDirectory, "evidence"));
++                    generated.ImportedState = ImportedPlayerState.FromRequest(options.RequestPath);
+                     session = generated.Session;
+                     return $"character={generated.Request.CharacterId} encounter={generated.Request.EncounterId} "
+                         + $"generated={generated.Resolved != null}";
+@@ -96,7 +106,8 @@ internal static class Program
+                 payload["scenario"] = new HarnessScenario(
+                     generated!.Request.CharacterId, generated.Request.EncounterId,
+                     generated.Request.Seed, generated.Request.Ascension,
+-                    generated.Request.ActIndexForTest);
++                    generated.Request.ActIndexForTest,
++                    generated.Request.ActIdForTest);
+                 payload["resolvedScenario"] = generated!.Resolved?.Options;
+                 payload["catalogFingerprint"] = generated.Resolved?.CatalogFingerprint;
+ 
+@@ -366,6 +377,7 @@ internal sealed record HarnessOptions
+     public const string Usage = """
+         用法：OfflineSearchHarness [选项]
+           --request <path>       固定夹具或含 generatedScenarioPath 的无人测试请求 JSON
++          --worker-manifest <p>  常驻宿主批次清单；初始化游戏一次后依次处理其中请求
+           --label <name>         本根标签（写进 result.json，默认 offline）
+           --character <id>       角色（无 --request 时用，默认 IRONCLAD）
+           --encounter <id>       遭遇（无 --request 时用，默认 FUZZY_WURM_CRAWLER_WEAK）
+@@ -419,11 +431,13 @@ internal sealed record HarnessOptions
+           --workspace <dir>      工作区目录（默认 .local/offline-harness）
+           --language <code>      本地化语言码（默认 eng）
+           --verbose-game-log     把游戏 info/debug 日志也打到标准输出
++          --stop-on-error        常驻批次首个失败后停止
+         环境变量 OFFLINE_HARNESS_COMBATSOLVER_DLL 可以换掉运行时加载的 CombatSolver.dll。
+         """;
+ 
+     public HarnessScenario Scenario { get; init; } = new("IRONCLAD", "FUZZY_WURM_CRAWLER_WEAK", "OFFLINEHARNESS1", 0, 0);
+     public string? RequestPath { get; init; }
++    public string? WorkerManifestPath { get; init; }
+     public string Label { get; init; } = "offline";
+     public string Profile { get; init; } = "Custom";
+     public int? Beam { get; init; }
+@@ -483,6 +497,7 @@ internal sealed record HarnessOptions
+     public string OutputDirectory { get; init; } = string.Empty;
+     public bool VerboseGameLog { get; init; }
+     public string Language { get; init; } = "eng";
++    public bool StopOnError { get; init; }
+ 
+     public string LogDirectory => Path.Combine(OutputDirectory, "logs");
+ 
+@@ -517,7 +532,8 @@ internal sealed record HarnessOptions
+         string? output = null, requestPath = null;
+         string workspace = Path.GetFullPath(Path.Combine(
+             AppContext.BaseDirectory, "../../../../../../.local/offline-harness"));
+-        bool verbose = false;
++        string? workerManifestPath = null;
++        bool verbose = false, stopOnError = false;
+ 
+         for (int index = 0; index < args.Length; index++)
+         {
+@@ -531,6 +547,7 @@ internal sealed record HarnessOptions
+             switch (key)
+             {
+                 case "--request": requestPath = Path.GetFullPath(Value()); break;
++                case "--worker-manifest": workerManifestPath = Path.GetFullPath(Value()); break;
+                 case "--label": label = Value(); break;
+                 case "--character": character = Value(); break;
+                 case "--encounter": encounter = Value(); break;
+@@ -591,6 +608,7 @@ internal sealed record HarnessOptions
+                 case "--workspace": workspace = Value(); break;
+                 case "--language": language = Value(); break;
+                 case "--verbose-game-log": verbose = true; break;
++                case "--stop-on-error": stopOnError = true; break;
+                 default: throw new ArgumentException($"未知选项 {key}。");
+             }
+         }
+@@ -671,6 +689,7 @@ internal sealed record HarnessOptions
+         {
+             Scenario = new HarnessScenario(character, encounter, seed, ascension, actIndex),
+             RequestPath = requestPath,
++            WorkerManifestPath = workerManifestPath,
+             Label = label,
+             Profile = profile,
+             Beam = beam,
+@@ -719,6 +738,7 @@ internal sealed record HarnessOptions
+             OutputDirectory = Path.GetFullPath(output ?? Path.Combine(workspace, "offline")),
+             VerboseGameLog = verbose,
+             Language = language,
++            StopOnError = stopOnError,
+         };
+     }
+ }
+diff --git a/tools/search/OfflineSearchHarness/WarmWorker.cs b/tools/search/OfflineSearchHarness/WarmWorker.cs
+new file mode 100644
+index 00000000..b660e0f3
+--- /dev/null
++++ b/tools/search/OfflineSearchHarness/WarmWorker.cs
+@@ -0,0 +1,364 @@
++using System.Diagnostics;
++using System.Reflection;
++using System.Text.Json;
++using System.Text.Json.Serialization;
++using CombatSolver;
++using MegaCrit.Sts2.Core.Combat;
++using MegaCrit.Sts2.Core.Context;
++using MegaCrit.Sts2.Core.Runs;
++
++namespace OfflineSearchHarness;
++
++/// <summary>
++/// A process-local batch host.  The ordinary harness intentionally exits after
++/// one request; this worker keeps the immutable game/model bootstrap alive and
++/// recreates only the run, combat and per-request unattended session.  Each
++/// request still gets its own output directory and native run cleanup.
++/// </summary>
++internal static class WarmWorker
++{
++    private static readonly JsonSerializerOptions Json = new()
++    {
++        WriteIndented = true,
++        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
++        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
++    };
++
++    private static readonly JsonSerializerOptions ManifestJson = new()
++    {
++        PropertyNameCaseInsensitive = true,
++    };
++
++    private sealed record WorkerManifest(WorkerCase[] Cases);
++
++    private sealed record WorkerCase(
++        string RequestPath,
++        string Label,
++        string OutputDirectory,
++        int Index);
++
++    internal static int Run(HarnessOptions options)
++    {
++        if (options.WorkerManifestPath is not { } manifestPath)
++            throw new InvalidOperationException("常驻宿主缺少 worker manifest。");
++        WorkerManifest manifest = JsonSerializer.Deserialize<WorkerManifest>(
++            File.ReadAllText(manifestPath), ManifestJson)
++            ?? throw new InvalidDataException("worker manifest 为空。");
++        if (manifest.Cases is not { Length: > 0 })
++            throw new InvalidDataException("worker manifest 没有场次。");
++
++        Directory.CreateDirectory(options.OutputDirectory);
++        MainLoopContext loop = new();
++        SynchronizationContext.SetSynchronizationContext(loop);
++        bool initialized = false;
++        int failures = 0;
++        try
++        {
++            Initialize(options);
++            initialized = true;
++            Console.WriteLine($"WARM_READY cases={manifest.Cases.Length}");
++            Console.Out.Flush();
++
++            foreach (WorkerCase item in manifest.Cases.OrderBy(item => item.Index))
++            {
++                Console.WriteLine($"WARM_CASE_START index={item.Index} label={item.Label}");
++                Console.Out.Flush();
++                HarnessOptions caseOptions = options with
++                {
++                    RequestPath = Path.GetFullPath(item.RequestPath),
++                    WorkerManifestPath = null,
++                    Label = item.Label,
++                    OutputDirectory = Path.GetFullPath(item.OutputDirectory),
++                };
++                Directory.CreateDirectory(caseOptions.OutputDirectory);
++                int returnCode = RunCase(caseOptions, loop);
++                failures += returnCode == 0 ? 0 : 1;
++                CleanupRun(loop);
++                Console.WriteLine($"WARM_CASE_COMPLETE index={item.Index} returnCode={returnCode}");
++                Console.Out.Flush();
++                if (returnCode != 0 && options.StopOnError)
++                    break;
++            }
++            Console.WriteLine($"WARM_FINISHED failures={failures}");
++            Console.Out.Flush();
++            return failures == 0 ? 0 : 1;
++        }
++        catch (Exception error)
++        {
++            Exception root = Unwrap(error);
++            Console.Error.WriteLine($"[WARM_FAIL] {root.GetType().Name}: {root.Message}");
++            Console.Error.WriteLine(root.StackTrace);
++            return 1;
++        }
++        finally
++        {
++            if (initialized)
++            {
++                // A failed case can leave a run alive; never carry it into a
++                // later worker invocation or let the process linger after the
++                // manifest has finished.
++                try { CleanupRun(loop); }
++                finally
++                {
++                    ModRuntime.Session?.Dispose();
++                    ModRuntime.FlushDiagnostics();
++                }
++            }
++        }
++    }
++
++    private static void Initialize(HarnessOptions options)
++    {
++        List<StepRecord> steps = [];
++        Step(steps, "M0.1 装 Godot 绕过补丁", () =>
++        {
++            GameBootstrap.ApplyGodotBypasses();
++            int nodeCctors = GameBootstrap.SkipGodotNodeStaticConstructors();
++            return $"{GameBootstrap.Bypasses.Count} 处绕过（含 {nodeCctors} 个节点静态构造）";
++        });
++        Step(steps, "M0.2 初始化游戏静态状态", GameBootstrap.InitializeStaticState);
++        Step(steps, "M0.3 初始化模组运行期状态", () => ModRuntime.Initialize(options));
++        DuplicateChoiceProbe.Install(options.OutputDirectory);
++        EquivalenceProbe.Install(options.OutputDirectory);
++        SnapshotOpportunityProbe.Install(options.OutputDirectory);
++        if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_PROBE_STATICS") is { Length: > 0 } filter)
++            Step(steps, "P 静态构造探针", () => $"types={GameBootstrap.ProbeStaticConstructors(filter)}");
++        if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_MEMORY_DISPLAY_CHECKS") == "1")
++            MemoryDisplayChecks.Run();
++        if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_MEMORY_DISPLAY_CHECKS") == "baseline")
++            MemoryDisplayChecks.ReproduceOldCapacity();
++    }
++
++    private static int RunCase(HarnessOptions options, MainLoopContext loop)
++    {
++        if (options.RequestPath is not { } requestPath)
++            throw new InvalidOperationException("常驻宿主场次缺少 request 路径。");
++
++        List<StepRecord> steps = [];
++        Dictionary<string, object?> payload = new()
++        {
++            ["label"] = options.Label,
++            ["requestPath"] = requestPath,
++            ["milestone"] = options.Milestone,
++            ["warmWorker"] = true,
++        };
++        string reached = "none";
++        int exitCode = 0;
++        IDisposable? choiceScope = null;
++        GeneratedScenarioSetup? generated = null;
++        UnattendedTestRunner.OfflineScenarioSession? session = null;
++        CombatState? combat = null;
++        try
++        {
++            Step(steps, "G1.1 解析生成场景请求", () =>
++            {
++                UnattendedTestRequest request = GeneratedScenarioSetup.ReadRequest(requestPath);
++                generated = GeneratedScenarioSetup.Prepare(
++                    request, Path.Combine(options.OutputDirectory, "evidence"));
++                generated.ImportedState = ImportedPlayerState.FromRequest(requestPath);
++                session = generated.Session;
++                payload["scenario"] = new HarnessScenario(
++                    generated.Request.CharacterId, generated.Request.EncounterId,
++                    generated.Request.Seed, generated.Request.Ascension,
++                    generated.Request.ActIndexForTest, generated.Request.ActIdForTest);
++                payload["resolvedScenario"] = generated.Resolved?.Options;
++                payload["catalogFingerprint"] = generated.Resolved?.CatalogFingerprint;
++                return $"character={generated.Request.CharacterId} encounter={generated.Request.EncounterId} "
++                    + $"generated={generated.Resolved != null}";
++            });
++            Step(steps, "G1.2 建跑局、注入装备、进遭遇战房间", () =>
++            {
++                Task<IDisposable?> enter = generated!.EnterCombatRoomAsync();
++                loop.RunUntilCompleted(enter, TimeSpan.FromSeconds(300), "生成场景进房");
++                choiceScope = enter.GetAwaiter().GetResult();
++                return $"pumped={loop.PumpedCallbacks}";
++            });
++            Step(steps, "G1.3 推进到玩家第一回合", () =>
++            {
++                combat = OfflineCombat.WaitForPlayableCombat(loop);
++                generated!.CaptureOpening(combat);
++                if (!generated.Request.PreserveNativeCombatStateForTest)
++                    loop.RunUntilCompleted(generated.Session.InjectInitialStateAsync(
++                        combat, LocalContext.GetMe(combat)!),
++                        TimeSpan.FromSeconds(30), "固定夹具状态注入");
++                return OfflineCombat.DescribeRoot(combat);
++            });
++            payload["setupChoices"] = generated!.SetupChoices;
++            reached = "M1";
++            DuplicateChoiceProbe.RunBuilders(combat!, options.OutputDirectory);
++            SnapshotOpportunityProbe.RunShuffleWitness(combat!, options.OutputDirectory);
++            if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_HISTORY_CHECKS") == "1")
++                HistoryCounterChecks.Run(combat!, options.OutputDirectory);
++            if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_INFUSED_CORE_CHECKS") == "1")
++                InfusedCoreChecks.Run(combat!, options.OutputDirectory);
++            payload["budget"] = DescribeBudget(options);
++            payload["root"] = OfflineCombat.DescribeRoot(combat!);
++            string diagnostics = ModRuntime.DescribeStart(combat!);
++            payload["rootDiagnostics"] = diagnostics;
++            File.WriteAllText(Path.Combine(options.OutputDirectory, "root-diagnostics.txt"), diagnostics);
++
++            if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_FIXED_PREFIX_CONTINUATIONS") == "1")
++            {
++                Step(steps, "M2 固定长前缀续用测量", () =>
++                {
++                    payload["fixedPrefixContinuations"] = FixedPrefixContinuationBenchmark.Run(combat!, options, loop);
++                    return "N4/N8/N17; fixed-prefix-continuations.json";
++                });
++                reached = "M2";
++            }
++            else if (options.Milestone != "M1")
++            {
++                ModRuntime.SearchOutcome? outcome = null;
++                using MemorySampler memory = new(TimeSpan.FromMilliseconds(100));
++                Step(steps, $"M2.1 跑一次固定预算搜索（{options.SearchMode}）", () =>
++                {
++                    outcome = ModRuntime.RunSearchDetailed(combat!, options, loop, session);
++                    var solver = outcome.LegacyMetrics;
++                    return $"boundary={solver["boundary"]} total_expanded={solver["totalExpanded"]} "
++                        + $"total_transitions={solver["totalTransitions"]} score={solver["score"]} "
++                        + $"projected_battle_hp_lost={solver["projectedBattleHpLost"]} "
++                        + $"wall_s={outcome.WallSeconds:0.00}";
++                });
++                payload["search"] = new Dictionary<string, object?>
++                {
++                    ["rootContinuationStamp"] = outcome!.RootContinuationStamp,
++                    ["rootLiveStamp"] = outcome.RootLiveStamp,
++                    ["rootCapture"] = outcome.RootCapture,
++                    ["solverMetrics"] = outcome.LegacyMetrics,
++                    ["planActions"] = outcome.PlanActions,
++                    ["cachedContinuations"] = outcome.Result.Continuations
++                        .Select(item => new { item.StartTurnNumber, item.ForecastOffset, state = item.ExpectedState.StateText })
++                        .ToArray(),
++                    ["continuations"] = outcome.Continuations,
++                    ["patchLog"] = ModRuntime.PatchLog.ToArray(),
++                };
++                payload["solverMetrics"] = outcome.SolverMetrics;
++                payload["pruneCounters"] = outcome.LegacyMetrics;
++                payload["searchPolicy"] = outcome.Policy;
++                payload["comparisonQuality"] = outcome.Result.ComparisonQuality;
++                payload["phasePerformance"] = ModRuntime.LastPhasePerformance;
++                File.WriteAllText(Path.Combine(options.OutputDirectory, "search-policy.json"),
++                    JsonSerializer.Serialize(outcome.Policy, UnattendedTestFiles.JsonOptions));
++                payload["timeBoundaryObserved"] = outcome.TimeBoundaryObserved;
++                payload["wallSeconds"] = outcome.WallSeconds;
++                memory.Dispose();
++                payload["peakManagedHeapBytes"] = memory.PeakManagedHeapBytes;
++                payload["peakManagedLiveBytes"] = memory.PeakManagedLiveBytes;
++                payload["peakWorkingSetBytes"] = memory.PeakWorkingSetBytes;
++                payload["memorySamples"] = memory.Samples;
++                payload["totalAllocatedBytes"] = GC.GetTotalAllocatedBytes(precise: false);
++                File.WriteAllText(Path.Combine(options.OutputDirectory, "route.json"),
++                    JsonSerializer.Serialize(outcome.RouteActions, UnattendedTestFiles.JsonOptions));
++                reached = "M2";
++                if (Environment.GetEnvironmentVariable("OFFLINE_HARNESS_ANCILLARY_CHECKS") == "1")
++                    AncillaryFailureChecks.Run(outcome.Result, options.OutputDirectory);
++            }
++        }
++        catch (Exception error)
++        {
++            Exception root = Unwrap(error);
++            payload["error"] = new { type = root.GetType().FullName, message = root.Message, stack = root.StackTrace };
++            Console.Error.WriteLine($"[FAIL] {root.GetType().Name}: {root.Message}");
++            for (Exception? inner = root.InnerException; inner != null; inner = inner.InnerException)
++                Console.Error.WriteLine($"[FAIL:inner] {inner.GetType().Name}: {inner.Message}");
++            Console.Error.WriteLine(root.StackTrace);
++            exitCode = 1;
++        }
++        finally
++        {
++            choiceScope?.Dispose();
++        }
++
++        payload["reachedMilestone"] = reached;
++        payload["bypasses"] = GameBootstrap.Bypasses;
++        payload["steps"] = steps;
++        string resultPath = Path.Combine(options.OutputDirectory, "harness-result.json");
++        File.WriteAllText(resultPath, JsonSerializer.Serialize(payload, Json));
++        File.WriteAllText(Path.Combine(options.OutputDirectory, "result.json"),
++            JsonSerializer.Serialize(new Dictionary<string, object?>
++            {
++                ["label"] = options.Label,
++                ["status"] = exitCode == 0 ? "Passed" : "Failed",
++                ["reachedMilestone"] = reached,
++                ["requestPath"] = options.RequestPath,
++                ["profile"] = options.Profile,
++                ["searchMode"] = options.SearchMode,
++                ["budget"] = payload.GetValueOrDefault("budget"),
++                ["solverMetrics"] = payload.GetValueOrDefault("solverMetrics"),
++                ["pruneCounters"] = payload.GetValueOrDefault("pruneCounters"),
++                ["timeBoundaryObserved"] = payload.GetValueOrDefault("timeBoundaryObserved"),
++                ["wallSeconds"] = payload.GetValueOrDefault("wallSeconds"),
++                ["peakManagedHeapBytes"] = payload.GetValueOrDefault("peakManagedHeapBytes"),
++                ["peakManagedLiveBytes"] = payload.GetValueOrDefault("peakManagedLiveBytes"),
++                ["peakWorkingSetBytes"] = payload.GetValueOrDefault("peakWorkingSetBytes"),
++                ["totalAllocatedBytes"] = payload.GetValueOrDefault("totalAllocatedBytes"),
++                ["rootContinuationStamp"] = payload.GetValueOrDefault("search") is Dictionary<string, object?> s
++                    ? s.GetValueOrDefault("rootContinuationStamp") : null,
++                ["comparisonQuality"] = payload.GetValueOrDefault("comparisonQuality"),
++                ["continuations"] = payload.GetValueOrDefault("search") is Dictionary<string, object?> search
++                    ? search.GetValueOrDefault("continuations") : null,
++                ["catalogFingerprint"] = payload.GetValueOrDefault("catalogFingerprint"),
++                ["error"] = payload.GetValueOrDefault("error"),
++            }, UnattendedTestFiles.JsonOptions));
++        foreach (StepRecord step in steps)
++            Console.WriteLine($"| {step.Name} | {step.Status} | {step.Detail.Replace("|", "\\|")} | {step.Milliseconds} |");
++        Console.WriteLine($"reached={reached} result={resultPath}");
++        return exitCode;
++    }
++
++    private static void CleanupRun(MainLoopContext loop)
++    {
++        if (RunManager.Instance.IsInProgress)
++            RunManager.Instance.CleanUp(graceful: true);
++        loop.Pump(TimeSpan.FromMilliseconds(150));
++        if (RunManager.Instance.IsInProgress)
++            throw new InvalidOperationException("常驻宿主清理跑局后仍处于进行中，拒绝复用状态。");
++    }
++
++    private static object DescribeBudget(HarnessOptions options)
++    {
++        SolverSearchProfile profile = ModRuntime.ResolveProfile(options);
++        return new
++        {
++            options.Profile,
++            profile.BeamWidth,
++            profile.MaxExpandedNodes,
++            profile.MaxCardBranchesPerNode,
++            profile.MaxPileChoiceBranchesPerAction,
++            profile.MaxHandChoiceBranchesPerAction,
++            options.MaxDegreeOfParallelism,
++            options.BudgetMilliseconds,
++            options.PotionPolicy,
++            options.SearchMode,
++            options.UsePortfolio,
++            fixedSearchBudget = !options.ProductionBudget,
++            enableNoGcRegion = options.EnableNoGcRegion,
++            noGcRegionBudgetGigabytes = options.EnableNoGcRegion ? options.NoGcRegionBudgetGigabytes : (double?)null,
++        };
++    }
++
++    private static void Step(List<StepRecord> steps, string name, Func<string> body)
++    {
++        Stopwatch watch = Stopwatch.StartNew();
++        try
++        {
++            string detail = body();
++            steps.Add(new StepRecord(name, "ok", detail, watch.ElapsedMilliseconds));
++            Console.WriteLine($"[ok]   {name}: {detail} ({watch.ElapsedMilliseconds} ms)");
++        }
++        catch (Exception error)
++        {
++            Exception root = Unwrap(error);
++            steps.Add(new StepRecord(name, "FAIL", $"{root.GetType().Name}: {root.Message}", watch.ElapsedMilliseconds));
++            Console.WriteLine($"[FAIL] {name}: {root.GetType().Name}: {root.Message} ({watch.ElapsedMilliseconds} ms)");
++            throw;
++        }
++    }
++
++    private static Exception Unwrap(Exception error)
++    {
++        while (error is TargetInvocationException or AggregateException && error.InnerException != null)
++            error = error.InnerException;
++        return error;
++    }
++}

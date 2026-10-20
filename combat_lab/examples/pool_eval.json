@@ -1,0 +1,40 @@
+{
+  "mode": "build",
+  "character": "IRONCLAD",
+  "seed": "COMBAT-LAB-POOL",
+  "deck": [
+    "STRIKE_IRONCLAD",
+    "STRIKE_IRONCLAD",
+    "STRIKE_IRONCLAD",
+    "STRIKE_IRONCLAD",
+    "STRIKE_IRONCLAD",
+    "DEFEND_IRONCLAD",
+    "DEFEND_IRONCLAD",
+    "DEFEND_IRONCLAD",
+    "DEFEND_IRONCLAD",
+    "BASH"
+  ],
+  "relics": [
+    "BURNING_BLOOD"
+  ],
+  "pool": [
+    {
+      "id": "FUZZY_WURM_CRAWLER_WEAK",
+      "kind": "normal"
+    },
+    {
+      "id": "ENTOMANCER_ELITE",
+      "kind": "elite"
+    }
+  ],
+  "poolSeed": "COMBAT-LAB-POOL-SAMPLE",
+  "samples": 10,
+  "search": {
+    "profile": "Medium",
+    "budgetMs": 8000,
+    "dop": 1
+  },
+  "ascension": 10,
+  "act": 0,
+  "actId": "OVERGROWTH"
+}

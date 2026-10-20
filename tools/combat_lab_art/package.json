@@ -1,0 +1,12 @@
+{
+  "name": "combat-lab-art-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node render.mjs"
+  },
+  "dependencies": {
+    "@esotericsoftware/spine-webgl": "4.2.43",
+    "playwright": "1.56.1"
+  }
+}

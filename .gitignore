@@ -1,0 +1,38 @@
+# Local game dependencies and build outputs
+CombatSolver/
+.venv/
+node_modules/
+**/node_modules/
+__pycache__/
+*.py[cod]
+**/bin/
+**/obj/
+*.dll
+*.exe
+*.pck
+*.zip
+*.pdb
+local.props
+
+# Generated proprietary game data and local evaluation state
+combat_lab/game_catalog_zhs.json
+combat_lab/card_values.json
+combat_lab/assets/
+combat_lab/runs/
+combat_lab/.art_work/
+*.save
+*.run
+*.log
+*.dmp
+
+# Local editor / credential / machine settings
+.vs/
+.idea/
+.env
+.env.*
+!.env.example
+*.user
+*.pem
+*.key
+Thumbs.db
+.DS_Store
