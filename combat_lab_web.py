@@ -43,6 +43,9 @@ _HARNESS_CANDIDATES = (
     ROOT / "CombatSolver" / "tools" / "OfflineSearchHarness" / "bin" / "Release" / "net9.0" / "OfflineSearchHarness.dll",
 )
 HARNESS_PATH = next((path for path in _HARNESS_CANDIDATES if path.exists()), _HARNESS_CANDIDATES[0])
+_env_harness = os.environ.get("COMBAT_LAB_HARNESS")
+if _env_harness and Path(_env_harness).exists():
+    HARNESS_PATH = Path(_env_harness).resolve()
 
 
 def _read_catalog() -> dict[str, Any]:
@@ -300,6 +303,8 @@ class JobStore:
             # for a redirected child stdout and fail on game-localized text.
             process_env["PYTHONIOENCODING"] = "utf-8:replace"
             process_env["PYTHONUTF8"] = "1"
+            if os.environ.get("COMBAT_LAB_COLD") == "1":
+                process_env["COMBAT_LAB_COLD"] = "1"
             process = subprocess.Popen(
                 command,
                 cwd=str(ROOT),

@@ -41,6 +41,9 @@ _HARNESS_CANDIDATES = (
     ROOT / "CombatSolver" / "tools" / "OfflineSearchHarness" / "bin" / "Release" / "net9.0" / "OfflineSearchHarness.dll",
 )
 DEFAULT_HARNESS = next((path for path in _HARNESS_CANDIDATES if path.exists()), _HARNESS_CANDIDATES[0])
+_env_harness = os.environ.get("COMBAT_LAB_HARNESS")
+if _env_harness and Path(_env_harness).exists():
+    DEFAULT_HARNESS = Path(_env_harness).resolve()
 DEFAULT_ACT_COUNT = 3
 
 
@@ -358,9 +361,49 @@ def _build_request(plan: dict[str, Any], case: dict[str, Any], index: int) -> di
             request["preCombatPlayerCurrentHpOverride"] = _optional_int(
                 plan["preCombatPlayerCurrentHpOverride"], "preCombatPlayerCurrentHpOverride"
             )
+        # 未打补丁的 harness 不认 combatLabPlayerStatePath（那是 Combat Lab 补丁新增的
+        # 导入通道），它会把 runCards/relics/potions 当成空，等于拿初始牌组去打。
+        # 冷启动模式下把已经物化好的牌组、遗物、药水直接内联进请求，与 build 模式等价。
+        if os.environ.get("COMBAT_LAB_COLD") == "1":
+            inventory = plan.get("_coldInventory") or {}
+
+            def _inventory(key: str) -> Any:
+                value = inventory.get(key)
+                return value if value else plan.get(key)
+
+            request.update(
+                {
+                    "clearRunDeck": True,
+                    "clearStartingRelics": bool(plan.get("clearStartingRelics", True)),
+                    "runCards": [
+                        _normalise_card(item, deck=True)
+                        for item in _as_list(_inventory("deck"), "deck")
+                    ],
+                    "relics": [
+                        _normalise_relic(item)
+                        for item in _as_list(_inventory("relics"), "relics")
+                    ],
+                    "potions": [
+                        _normalise_potion(item)
+                        for item in _as_list(_inventory("potions"), "potions")
+                    ],
+                    "preserveNativeCombatStateForTest": True,
+                }
+            )
     else:
-        serialized_inventory = bool(plan.get("saveImport") and plan.get("_playerStatePath"))
-        deck = [] if serialized_inventory else [_normalise_card(item, deck=True) for item in _as_list(plan.get("deck"), "deck")]
+        cold = os.environ.get("COMBAT_LAB_COLD") == "1"
+        # 存档模式在物化后会被改写成 build 模式，并把清单存进 _playerStatePath；
+        # 冷启动没有导入通道，所以照常内联，用物化前留存的原始清单。
+        serialized_inventory = bool(plan.get("saveImport") and plan.get("_playerStatePath")) and not cold
+        inventory = plan.get("_coldInventory") or {}
+
+        def _inventory_value(key: str) -> Any:
+            value = inventory.get(key)
+            if cold and value:
+                return value
+            return plan.get(key)
+
+        deck = [] if serialized_inventory else [_normalise_card(item, deck=True) for item in _as_list(_inventory_value("deck"), "deck")]
         if not deck and not serialized_inventory:
             raise CombatLabError("build 模式需要至少一张 deck 卡牌")
         request.update(
@@ -368,12 +411,12 @@ def _build_request(plan: dict[str, Any], case: dict[str, Any], index: int) -> di
                 "clearRunDeck": True,
                 "clearStartingRelics": bool(plan.get("clearStartingRelics", True)),
                 "runCards": deck,
-                "relics": [] if serialized_inventory else [_normalise_relic(item) for item in _as_list(plan.get("relics"), "relics")],
-                "potions": [] if serialized_inventory else [_normalise_potion(item) for item in _as_list(plan.get("potions"), "potions")],
+                "relics": [] if serialized_inventory else [_normalise_relic(item) for item in _as_list(_inventory_value("relics"), "relics")],
+                "potions": [] if serialized_inventory else [_normalise_potion(item) for item in _as_list(_inventory_value("potions"), "potions")],
                 "preserveNativeCombatStateForTest": not bool(initial),
             }
         )
-    if plan.get("_playerStatePath"):
+    if plan.get("_playerStatePath") and os.environ.get("COMBAT_LAB_COLD") != "1":
         request["combatLabPlayerStatePath"] = plan["_playerStatePath"]
         if plan.get("saveImport"):
             request.update(runCards=[], relics=[], potions=[], clearRunDeck=False, clearStartingRelics=False)
@@ -436,6 +479,26 @@ def _search_args(search: dict[str, Any]) -> list[str]:
     return args
 
 
+def _player_hp_args(plan: dict[str, Any]) -> list[str]:
+    """把计划里的起始血量通过 harness 的命令行参数传进去。
+
+    未打补丁的 harness 在请求里没有血量字段，只认 --player-hp / --player-max-hp，
+    否则一律用角色默认满血（例如亡灵契约师 66），会把遗物提供的上限加成也丢掉。
+    """
+
+    stats = (plan.get("_coldInventory") or {}).get("playerStats") or plan.get("playerStats") or {}
+    if not isinstance(stats, dict):
+        return []
+    args: list[str] = []
+    hp = _optional_int(stats.get("hp"), "playerStats.hp")
+    max_hp = _optional_int(stats.get("maxHp"), "playerStats.maxHp")
+    if max_hp is not None and max_hp > 0:
+        args.extend(["--player-max-hp", str(max_hp)])
+    if hp is not None and hp > 0:
+        args.extend(["--player-hp", str(hp)])
+    return args
+
+
 def _find_metric(value: Any, *keys: str) -> Any:
     if isinstance(value, dict):
         lowered = {str(k).casefold(): v for k, v in value.items()}
@@ -451,7 +514,11 @@ def _case_metrics(result_dir: Path) -> dict[str, Any]:
     result = _read_json(result_path) if result_path.exists() else {}
     harness = _read_json(harness_path) if harness_path.exists() else {}
     metrics = result.get("solverMetrics") or harness.get("solverMetrics") or {}
-    status = str(result.get("status", "Failed"))
+    status = str(
+        result.get("status")
+        or harness.get("status")
+        or ("Passed" if harness.get("reachedMilestone") else "Failed")
+    )
     return {
         "status": status,
         "boundary": _find_metric(metrics, "boundary"),
@@ -509,6 +576,19 @@ def _resolve_case_workers(search: dict[str, Any], case_count: int, *, stop_on_er
     return min(case_count, requested, cpu_cap, 4)
 
 
+def _decode_harness_bytes(raw: bytes) -> str:
+    """解一行 harness 输出。
+
+    .NET 在 stdout 被重定向时会退回系统 OEM 代码页（简中为 GBK），直接按 UTF-8
+    解会把中文步骤名变成 U+FFFD；先试 UTF-8，失败再按 GBK 解。
+    """
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("gbk", errors="replace")
+
+
 def _run_case(
     prepared: dict[str, Any],
     *,
@@ -551,14 +631,11 @@ def _run_case(
             env=process_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
+            bufsize=0,
         )
         assert process.stdout is not None
-        for line in process.stdout:
-            clean = line.rstrip("\r\n")
+        for raw in process.stdout:
+            clean = _decode_harness_bytes(raw).rstrip("\r\n")
             process_output.append(clean)
             print(clean, flush=True)
         return_code = process.wait()
@@ -809,6 +886,8 @@ def evaluate(args: argparse.Namespace) -> int:
             "或移除 mods 字段后只评估原版/当前程序集中的内容。"
         )
     harness = Path(args.harness).expanduser().resolve() if args.harness else DEFAULT_HARNESS
+    if getattr(args, "cold", False):
+        os.environ["COMBAT_LAB_COLD"] = "1"
     if not harness.exists():
         raise CombatLabError(
             f"找不到 OfflineSearchHarness：{harness}\n"
@@ -827,9 +906,16 @@ def evaluate(args: argparse.Namespace) -> int:
         raise CombatLabError(f"输出目录非空，使用 --force 才会覆盖：{out}")
     out.mkdir(parents=True, exist_ok=True)
     try:
+        _cold_inventory = {
+            "deck": plan.get("deck"),
+            "relics": plan.get("relics"),
+            "potions": plan.get("potions"),
+            "playerStats": plan.get("playerStats"),
+        }
         plan = materialize_plan(plan, out)
     except (SaveImportError, ValueError, TypeError) as exc:
         raise CombatLabError(f"无法准备评估状态：{exc}") from exc
+    plan["_coldInventory"] = _cold_inventory
     cases = _sample_cases(plan)
     search = _as_dict(plan.get("search", {}), "search")
     records: list[dict[str, Any]] = []
@@ -864,6 +950,7 @@ def evaluate(args: argparse.Namespace) -> int:
             "--milestone",
             "M2",
             *_search_args(search),
+            *_player_hp_args(plan),
         ]
         prepared_cases.append(
             {
@@ -900,42 +987,62 @@ def evaluate(args: argparse.Namespace) -> int:
             transitions=metrics.get("totalTransitions"),
         )
 
-    print(
-        f"使用 {workers} 个常驻场次宿主；每个宿主复用游戏初始化，"
-        f"场次之间清理跑局，单场内部 DOP={search.get('dop', 1)}。",
-        flush=True,
-    )
-    batches: list[list[dict[str, Any]]] = [[] for _ in range(workers)]
-    for position, prepared in enumerate(prepared_cases):
-        batches[position % workers].append(prepared)
-    warm_kwargs = {
-        "dotnet": dotnet,
-        "harness": harness,
-        "search": search,
-        "out": out,
-        "args": args,
-        "total": len(cases),
-    }
-    if workers == 1:
-        for record in _run_warm_worker(
-            batches[0], worker_index=1, **warm_kwargs
-        ):
-            collect(record)
+    use_cold = bool(getattr(args, "cold", False)) or os.environ.get("COMBAT_LAB_COLD") == "1"
+    if use_cold:
+        print(
+            f"使用 {workers} 个逐局冷启动进程（未打补丁的 harness 兼容模式），"
+            f"单场内部 DOP={search.get('dop', 1)}。",
+            flush=True,
+        )
+        case_kwargs = {"args": args, "total": len(cases)}
+        if workers == 1:
+            for prepared in prepared_cases:
+                collect(_run_case(prepared, **case_kwargs))
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="combat-cold") as executor:
+                futures = [
+                    executor.submit(_run_case, prepared, **case_kwargs)
+                    for prepared in prepared_cases
+                ]
+                for future in as_completed(futures):
+                    collect(future.result())
     else:
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="combat-warm") as executor:
-            futures = {
-                executor.submit(
-                    _run_warm_worker,
-                    batch,
-                    worker_index=worker_index,
-                    **warm_kwargs,
-                ): worker_index
-                for worker_index, batch in enumerate(batches, start=1)
-                if batch
-            }
-            for future in as_completed(futures):
-                for record in future.result():
-                    collect(record)
+        print(
+            f"使用 {workers} 个常驻场次宿主；每个宿主复用游戏初始化，"
+            f"场次之间清理跑局，单场内部 DOP={search.get('dop', 1)}。",
+            flush=True,
+        )
+        batches: list[list[dict[str, Any]]] = [[] for _ in range(workers)]
+        for position, prepared in enumerate(prepared_cases):
+            batches[position % workers].append(prepared)
+        warm_kwargs = {
+            "dotnet": dotnet,
+            "harness": harness,
+            "search": search,
+            "out": out,
+            "args": args,
+            "total": len(cases),
+        }
+        if workers == 1:
+            for record in _run_warm_worker(
+                batches[0], worker_index=1, **warm_kwargs
+            ):
+                collect(record)
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="combat-warm") as executor:
+                futures = {
+                    executor.submit(
+                        _run_warm_worker,
+                        batch,
+                        worker_index=worker_index,
+                        **warm_kwargs,
+                    ): worker_index
+                    for worker_index, batch in enumerate(batches, start=1)
+                    if batch
+                }
+                for future in as_completed(futures):
+                    for record in future.result():
+                        collect(record)
     records.sort(key=lambda item: item["index"])
     report = {
         "schemaVersion": 1,
@@ -943,7 +1050,7 @@ def evaluate(args: argparse.Namespace) -> int:
         "plan": str(plan_path),
         "harness": str(harness),
         "orchestration": {
-            "warmWorkers": True,
+            "warmWorkers": not use_cold,
             "caseWorkers": workers,
             "dop": search.get("dop", 1),
         },
@@ -981,6 +1088,11 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--force", action="store_true", help="允许写入非空输出目录")
     evaluate_parser.add_argument("--verbose", action="store_true", help="显示每次调用的完整命令")
     evaluate_parser.add_argument("--stop-on-error", action="store_true", help="首个失败后停止")
+    evaluate_parser.add_argument(
+        "--cold",
+        action="store_true",
+        help="逐局冷启动（兼容没有 --worker-manifest 的 harness；也可设环境变量 COMBAT_LAB_COLD=1）",
+    )
     evaluate_parser.set_defaults(func=evaluate)
     return parser
 
