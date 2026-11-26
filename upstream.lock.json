@@ -1,12 +1,12 @@
 {
   "combatSolver": {
     "repository": "https://github.com/Torch1230/CombatSolver.git",
-    "commit": "4533f6bb8c9b049aa27693e38da0f2854b31dd36",
-    "version": "0.49.1",
+    "commit": "248765df11db44ec660a4e9a41cf9965a41f19a5",
+    "version": "1.0.0",
     "patch": "patches/combat-solver-combat-lab.patch"
   },
-  "gameVersion": "0.111.0",
-  "ritsuLibReferenceTarget": "0.111.0",
+  "gameVersion": "0.113.1",
+  "ritsuLibReferenceTarget": "0.113.0",
   "ritsuWorkshopId": "3747602295",
   "seedOracleReference": {
     "repository": "https://github.com/SlimoonLee/SeedOracle",

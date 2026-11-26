@@ -142,7 +142,10 @@ def export_portraits(catalog: dict, pck: Path, work: Path) -> None:
     compressed = []
     for resource in exports.values():
         contents = (remaps / resource).read_text(encoding="utf-8")
-        match = re.search(r'^path="([^"]+)"', contents, re.MULTILINE)
+        # Imports point at one target as path="…"; VRAM-compressed textures such as
+        # the beta portraits use a format-suffixed key like path.bptc="…" instead.
+        match = (re.search(r'^path="([^"]+)"', contents, re.MULTILINE)
+                 or re.search(r'^path\.[\w.]+="([^"]+)"', contents, re.MULTILINE))
         if not match:
             raise ValueError(f"No texture remap in {resource}; is the installed game version supported?")
         compressed.append(match[1])

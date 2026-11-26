@@ -22,6 +22,9 @@ ASSETS = ROOT / "combat_lab/assets"
 DEFAULT_PCK = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / (
     "Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.pck"
 )
+# setup_combat_lab.ps1 exports the path given with -GdreTools; the repository
+# default is kept so a manual `tools/gdre_tools.exe` drop-in still works.
+GDRE_TOOLS = Path(os.environ.get("GDRE_TOOLS") or ROOT / "tools/gdre_tools.exe")
 
 # Pick a deterministic representative for randomized cosmetic skins. Specific
 # monster variants use the same skin names as their game's SetupSkins methods.
@@ -118,13 +121,38 @@ def scene_profile(scene: Path, scenes: Path, monster_id: str) -> dict | None:
     return result
 
 
-def run_gdre(pck: Path, output: Path, includes: list[str], recover: bool = True) -> None:
+# Windows caps a command line at 32,767 characters. One --include per resource
+# overflows that with a full card set, so resources are requested in batches.
+MAX_COMMAND_CHARS = 30_000
+
+
+def run_gdre(pck: Path, output: Path, includes: list[str], recover: bool = True, optional: bool = False) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    command = [str(ROOT / "tools/gdre_tools.exe"), "--headless", f"--{'recover' if recover else 'extract'}={pck}", f"--output={output}"]
-    command += [f"--include={value}" for value in sorted(set(includes))]
-    process = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if process.returncode:
-        raise RuntimeError(process.stdout[-3000:] + process.stderr[-3000:])
+    if not GDRE_TOOLS.is_file():
+        raise RuntimeError(f"找不到 GDRE Tools：{GDRE_TOOLS}；用 -GdreTools 指定 gdre_tools.exe 或设置 GDRE_TOOLS。")
+    command = [str(GDRE_TOOLS), "--headless", f"--{'recover' if recover else 'extract'}={pck}", f"--output={output}"]
+    overhead = sum(len(value) + 3 for value in command)
+
+    def request(batch: list[str]) -> None:
+        if not batch:
+            return
+        process = subprocess.run(command + batch, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if process.returncode:
+            # With optional=True a batch that matches nothing is an answer, not a failure.
+            if optional and "no files found that match includes" in process.stdout + process.stderr:
+                return
+            raise RuntimeError(process.stdout[-3000:] + process.stderr[-3000:])
+
+    batch: list[str] = []
+    length = overhead
+    for value in sorted(set(includes)):
+        argument = f"--include={value}"
+        if batch and length + len(argument) + 3 > MAX_COMMAND_CHARS:
+            request(batch)
+            batch, length = [], overhead
+        batch.append(argument)
+        length += len(argument) + 3
+    request(batch)
     print(f"Recovered assets into {output.name}")
 
 

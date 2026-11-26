@@ -105,7 +105,7 @@ const state = {
   pollTimer: null,
   report: null,
   filters: { deckQuery: '', cardQuery: '', cardType: 'ALL', cardRarity: 'ALL', cardCost: 'ALL', cardPool: 'CURRENT', relicQuery: '', relicRarity: 'ALL', potionQuery: '', potionRarity: 'ALL' },
-  settings: { profile: 'Medium', searchMode: 'Evaluate', potionPolicy: 'Smart', language: 'zhs', samples: 3, poolSeed: 'pool-a', budgetMs: 120000, dop: 2, caseWorkers: 2, beam: '', nodes: '', cardBranches: '', pileBranches: '', handBranches: '', usePortfolio: false, adaptiveNoveltyRefinement: false, stopAtZeroLoss: false, productionBudget: false, measurePhases: false, enableNoGcRegion: false, noGcRegionBudgetGigabytes: 16 },
+  settings: { profile: 'Medium', searchMode: 'Evaluate', potionPolicy: 'Smart', language: 'zhs', samples: 3, poolSeed: 'pool-a', budgetMs: 120000, dop: 2, caseWorkers: 2, beam: '', nodes: '', cardBranches: '', pileBranches: '', handBranches: '', stopAtZeroLoss: false, productionBudget: false, measurePhases: false },
 };
 
 const zh = {
@@ -983,25 +983,6 @@ function setSettingOptions(id, options, value) {
   select.value = value;
   if (select.value !== value && options.length) select.value = options[0][0];
 }
-function ensureNativeSettingControls() {
-  const switchList = document.querySelector('.settings-side .switch-list');
-  const advancedGrid = document.querySelector('.settings-side .advanced-grid');
-  if (switchList && !$('#noveltyInput')) {
-    const label = document.createElement('label');
-    label.innerHTML = '<input type="checkbox" id="noveltyInput"><span></span>';
-    switchList.appendChild(label);
-  }
-  if (switchList && !$('#noGcInput')) {
-    const label = document.createElement('label');
-    label.innerHTML = '<input type="checkbox" id="noGcInput"><span></span>';
-    switchList.appendChild(label);
-  }
-  if (advancedGrid && !$('#noGcBudgetInput')) {
-    const label = document.createElement('label');
-    label.innerHTML = '<span></span><input id="noGcBudgetInput" type="number" min="1" max="256" step="1">';
-    advancedGrid.appendChild(label);
-  }
-}
 function renderRuntimeEstimate() {
   const target = $('#runtimeEstimate');
   if (!target || !state.catalog) return;
@@ -1017,7 +998,6 @@ function renderRuntimeEstimate() {
 }
 function renderSettings() {
   const s = state.settings;
-  ensureNativeSettingControls();
   s.language = state.language === 'eng' ? 'eng' : 'zhs';
   const english = state.language === 'eng';
   const settingsEyebrow = document.querySelector('#tab-settings .eyebrow'); if (settingsEyebrow) settingsEyebrow.textContent = english ? 'SOLVER CONTROL' : '求解器控制';
@@ -1025,10 +1005,10 @@ function renderSettings() {
   const overridesKicker = document.querySelector('#tab-settings .settings-side .panel-kicker'); if (overridesKicker) overridesKicker.textContent = english ? 'OPTIONAL OVERRIDES' : '高级覆盖项';
   const budgetInput = $('#budgetInput'); const budgetLabel = budgetInput?.closest('label'); if (budgetLabel) budgetLabel.firstChild.textContent = english ? 'Time limit (seconds)' : '时间上限（秒）'; if (budgetInput) { budgetInput.min = '0.1'; budgetInput.step = '0.1'; }
   const settingLabels = {
-    profileSelect: ['性能预设', 'Performance preset'], searchModeSelect: ['搜索模式', 'Search mode'], potionPolicySelect: ['药水政策', 'Potion policy'], languageSelect: ['求解语言', 'Solver language'], samplesInput: ['样本数', 'Samples'], poolSeedInput: ['池种子', 'Pool seed'], dopInput: ['单场并行度 DOP', 'Per-case parallelism (DOP)'], caseWorkersInput: ['场次并行', 'Parallel cases'], beamInput: ['Beam 宽度', 'Beam width'], nodesInput: ['最大节点', 'Max nodes'], cardBranchesInput: ['卡牌分支', 'Card branches per node'], pileBranchesInput: ['牌堆分支', 'Pile choice branches'], handBranchesInput: ['手牌分支', 'Hand choice branches'], noGcBudgetInput: ['暂缓回收额度上限（GB）', 'No-GC budget (GB)'],
+    profileSelect: ['性能预设', 'Performance preset'], searchModeSelect: ['搜索模式', 'Search mode'], potionPolicySelect: ['药水政策', 'Potion policy'], languageSelect: ['求解语言', 'Solver language'], samplesInput: ['样本数', 'Samples'], poolSeedInput: ['池种子', 'Pool seed'], dopInput: ['单场并行度 DOP', 'Per-case parallelism (DOP)'], caseWorkersInput: ['场次并行', 'Parallel cases'], beamInput: ['Beam 宽度', 'Beam width'], nodesInput: ['最大节点', 'Max nodes'], cardBranchesInput: ['卡牌分支', 'Card branches per node'], pileBranchesInput: ['牌堆分支', 'Pile choice branches'], handBranchesInput: ['手牌分支', 'Hand choice branches'],
   };
   for (const [id, labels] of Object.entries(settingLabels)) { const field = $(`#${id}`); const label = field?.closest('label'); if (label?.firstChild) label.firstChild.textContent = english ? labels[1] : labels[0]; }
-  const switchLabels = { portfolioInput: ['启用宽度组合', 'Enable beam width portfolio'], stopZeroInput: ['达到战损目标后停止搜索', 'Stop when HP-loss target is met'], productionInput: ['使用生产预算流程', 'Use production budget flow'], measureInput: ['记录阶段耗时', 'Measure phase timings'] };
+  const switchLabels = { stopZeroInput: ['达到战损目标后停止搜索', 'Stop when HP-loss target is met'], productionInput: ['使用生产预算流程', 'Use production budget flow'], measureInput: ['记录阶段耗时', 'Measure phase timings'] };
   for (const [id, labels] of Object.entries(switchLabels)) { const span = $(`#${id}`)?.parentElement?.querySelector('span'); if (span) span.textContent = english ? labels[1] : labels[0]; }
   const budgetHeading = document.querySelector('#tab-settings .settings-main h3'); if (budgetHeading) budgetHeading.textContent = english ? 'Search budget' : '搜索预算';
   const overrideHeading = document.querySelector('#tab-settings .settings-side h3'); if (overrideHeading) overrideHeading.textContent = english ? 'Advanced overrides' : '高级覆盖项';
@@ -1040,20 +1020,17 @@ function renderSettings() {
     ? [['Evaluate', 'Single search'], ['Coordinator', 'Production coordinator']]
     : [['Evaluate', '单次求解'], ['Coordinator', '生产协调器']], s.searchMode);
   setSettingOptions('potionPolicySelect', english
-    ? [['Smart', 'Smart'], ['RequireAtLeastOne', 'Keep at least one'], ['Disallow', 'Disable potions']]
-    : [['Smart', '智能'], ['RequireAtLeastOne', '至少保留一瓶'], ['Disallow', '禁用药水']], s.potionPolicy);
+    ? [['Smart', 'Smart'], ['RequireAtLeastOne', 'Keep at least one'], ['Disabled', 'Disable potions']]
+    : [['Smart', '智能'], ['RequireAtLeastOne', '至少保留一瓶'], ['Disabled', '禁用药水']], s.potionPolicy);
   setSettingOptions('languageSelect', [['zhs', '简体中文'], ['eng', english ? 'English' : '英文']], s.language);
-  const noveltyLabel = $('#noveltyInput')?.parentElement?.querySelector('span'); if (noveltyLabel) noveltyLabel.textContent = english ? 'Multi-strategy route search (experimental)' : '多策略路线搜索（实验）';
-  const noGcLabel = $('#noGcInput')?.parentElement?.querySelector('span'); if (noGcLabel) noGcLabel.textContent = english ? 'Pause memory collection during search (fallback)' : '搜索时暂缓内存回收（备用）';
-  const noGcBudgetLabel = $('#noGcBudgetInput')?.parentElement?.querySelector('span'); if (noGcBudgetLabel) noGcBudgetLabel.textContent = english ? 'No-GC budget (GB)' : '暂缓回收额度上限（GB）';
-  for (const [id, key] of [['languageSelect', 'language'], ['samplesInput', 'samples'], ['poolSeedInput', 'poolSeed'], ['dopInput', 'dop'], ['caseWorkersInput', 'caseWorkers'], ['beamInput', 'beam'], ['nodesInput', 'nodes'], ['cardBranchesInput', 'cardBranches'], ['pileBranchesInput', 'pileBranches'], ['handBranchesInput', 'handBranches'], ['portfolioInput', 'usePortfolio'], ['noveltyInput', 'adaptiveNoveltyRefinement'], ['stopZeroInput', 'stopAtZeroLoss'], ['productionInput', 'productionBudget'], ['measureInput', 'measurePhases'], ['noGcInput', 'enableNoGcRegion'], ['noGcBudgetInput', 'noGcRegionBudgetGigabytes']]) { const el = $(`#${id}`); if (!el) continue; if (el.type === 'checkbox') el.checked = Boolean(s[key]); else el.value = s[key] ?? ''; }
+  for (const [id, key] of [['languageSelect', 'language'], ['samplesInput', 'samples'], ['poolSeedInput', 'poolSeed'], ['dopInput', 'dop'], ['caseWorkersInput', 'caseWorkers'], ['beamInput', 'beam'], ['nodesInput', 'nodes'], ['cardBranchesInput', 'cardBranches'], ['pileBranchesInput', 'pileBranches'], ['handBranchesInput', 'handBranches'], ['stopZeroInput', 'stopAtZeroLoss'], ['productionInput', 'productionBudget'], ['measureInput', 'measurePhases']]) { const el = $(`#${id}`); if (!el) continue; if (el.type === 'checkbox') el.checked = Boolean(s[key]); else el.value = s[key] ?? ''; }
   if (budgetInput) budgetInput.value = (Number(s.budgetMs || 0) / 1000).toString();
   renderRuntimeEstimate();
 }
 function renderAll() { renderContext(); renderDeck(); renderInventory('relic'); renderInventory('potion'); renderEncounterFilters(); renderEncounters(); renderEncounterLists(); renderSettings(); const languageToggle = $('#languageToggle'); if (languageToggle) languageToggle.textContent = state.language === 'eng' ? 'English' : '简体中文'; setTab(state.tab); }
 function collectSettings() {
   const s = state.settings;
-  for (const [id, key] of [['languageSelect', 'language'], ['profileSelect', 'profile'], ['searchModeSelect', 'searchMode'], ['potionPolicySelect', 'potionPolicy'], ['samplesInput', 'samples'], ['poolSeedInput', 'poolSeed'], ['dopInput', 'dop'], ['caseWorkersInput', 'caseWorkers'], ['beamInput', 'beam'], ['nodesInput', 'nodes'], ['cardBranchesInput', 'cardBranches'], ['pileBranchesInput', 'pileBranches'], ['handBranchesInput', 'handBranches'], ['portfolioInput', 'usePortfolio'], ['noveltyInput', 'adaptiveNoveltyRefinement'], ['stopZeroInput', 'stopAtZeroLoss'], ['productionInput', 'productionBudget'], ['measureInput', 'measurePhases'], ['noGcInput', 'enableNoGcRegion'], ['noGcBudgetInput', 'noGcRegionBudgetGigabytes']]) { const el = $(`#${id}`); if (!el) continue; s[key] = el.type === 'checkbox' ? el.checked : (['samples', 'dop', 'caseWorkers', 'noGcRegionBudgetGigabytes'].includes(key) ? Number(el.value || 0) : el.value); }
+  for (const [id, key] of [['languageSelect', 'language'], ['profileSelect', 'profile'], ['searchModeSelect', 'searchMode'], ['potionPolicySelect', 'potionPolicy'], ['samplesInput', 'samples'], ['poolSeedInput', 'poolSeed'], ['dopInput', 'dop'], ['caseWorkersInput', 'caseWorkers'], ['beamInput', 'beam'], ['nodesInput', 'nodes'], ['cardBranchesInput', 'cardBranches'], ['pileBranchesInput', 'pileBranches'], ['handBranchesInput', 'handBranches'], ['stopZeroInput', 'stopAtZeroLoss'], ['productionInput', 'productionBudget'], ['measureInput', 'measurePhases']]) { const el = $(`#${id}`); if (!el) continue; s[key] = el.type === 'checkbox' ? el.checked : (['samples', 'dop', 'caseWorkers'].includes(key) ? Number(el.value || 0) : el.value); }
   const budgetInput = $('#budgetInput'); if (budgetInput) s.budgetMs = Math.round(Number(budgetInput.value || 0) * 1000);
   if (s.language === 'eng' || s.language === 'zhs') state.language = s.language;
   return s;
@@ -1062,13 +1039,8 @@ function buildPlan() {
   const invalidCardInput = $$('#deckGrid input[data-card-field]').find((input) => !input.checkValidity());
   if (invalidCardInput) { invalidCardInput.reportValidity(); throw new Error('请先修正卡牌上未填写或超出范围的数值'); }
   const s = collectSettings(); const search = { profile: s.profile, searchMode: s.searchMode, potionPolicy: s.potionPolicy, language: s.language, samples: s.samples, poolSeed: s.poolSeed, budgetMs: s.budgetMs, dop: s.dop, caseWorkers: s.caseWorkers };
-  if (s.usePortfolio || s.adaptiveNoveltyRefinement) {
-    search.searchMode = 'Coordinator';
-    search.usePortfolio = true;
-  }
   for (const key of ['beam', 'nodes', 'cardBranches', 'pileBranches', 'handBranches']) if (s[key] !== '') search[key] = Number(s[key]);
-  for (const key of ['usePortfolio', 'adaptiveNoveltyRefinement', 'stopAtZeroLoss', 'productionBudget', 'measurePhases', 'enableNoGcRegion']) if (s[key]) search[key] = true;
-  if (s.noGcRegionBudgetGigabytes) search.noGcRegionBudgetGigabytes = Number(s.noGcRegionBudgetGigabytes);
+  for (const key of ['stopAtZeroLoss', 'productionBudget', 'measurePhases']) if (s[key]) search[key] = true;
   const selected = state.direct.length ? state.direct : (state.pool.length ? state.pool : encounterScope());
   if (!selected.length) throw new Error('请先选择至少一个测试遭遇');
   if (state.save.busy) throw new Error('存档仍在读取中');

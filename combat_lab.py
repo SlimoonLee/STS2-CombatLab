@@ -404,6 +404,9 @@ def _build_request(plan: dict[str, Any], case: dict[str, Any], index: int) -> di
 
 def _search_args(search: dict[str, Any]) -> list[str]:
     args: list[str] = ["--profile", str(search.get("profile", "Medium"))]
+    # 旧计划可能沿用 CombatSolver 0.49 的策略名 Disallow；1.0 起该策略改名为 Disabled。
+    if str(search.get("potionPolicy", "")).casefold() == "disallow":
+        search = {**search, "potionPolicy": "Disabled"}
     mapping = {
         "beam": "--beam",
         "nodes": "--nodes",
@@ -419,10 +422,10 @@ def _search_args(search: dict[str, Any]) -> list[str]:
     for key, option in mapping.items():
         if key in search:
             args.extend([option, str(search[key])])
+    # CombatSolver 1.0 的 HotSearch 引擎删除了自适应新颖性与无基线开关；旧计划里的这两个键
+    # 不再传递，否则宿主会以“未知选项”退出。组合策略与 NoGC 区域仍被上游当作兼容空操作接受。
     bool_options = {
         "usePortfolio": "--use-portfolio",
-        "adaptiveNoveltyRefinement": "--adaptive-novelty",
-        "noPlainBaseline": "--no-plain-baseline",
         "stopAtZeroLoss": "--stop-at-zero-loss",
         "productionBudget": "--production-budget",
         "measurePhases": "--measure-phases",
@@ -431,7 +434,7 @@ def _search_args(search: dict[str, Any]) -> list[str]:
     for key, option in bool_options.items():
         if bool(search.get(key, False)):
             args.append(option)
-    if "noGcRegionBudgetGigabytes" in search:
+    if search.get("enableNoGcRegion") and "noGcRegionBudgetGigabytes" in search:
         args.extend(["--no-gc-region-budget-gigabytes", str(search["noGcRegionBudgetGigabytes"])])
     return args
 
